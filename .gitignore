@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+*.log
+logs/
+.DS_Store
+.playwright-mcp/
+_probe_*.ts

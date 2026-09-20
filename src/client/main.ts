@@ -1,0 +1,687 @@
+/**
+ * Jev Dojo — live canvas client. Three scenes share one WebSocket and one <canvas>:
+ *   Router   — tasks classified by Jev fly down neon lanes; low-confidence escalates.
+ *   Swarm    — hundreds of agents react in parallel to one broadcast.
+ *   Gauntlet — Jev vs Claude on labeled tasks, scored against ground truth (honest).
+ */
+import { ROUTER_LANES, SWARM_ACTIONS } from "../shared/protocol";
+import type {
+  GauntletResult,
+  Health,
+  ReflexFrame,
+  RouterDecision,
+  ServerMsg,
+  SwarmAgentInit,
+  SwarmReaction,
+  TxEntry,
+} from "../shared/protocol";
+
+// --- palette ---------------------------------------------------------------
+const C = {
+  bg: "#08080d", panel: "#12131d", line: "#242637", text: "#e8eaf5", muted: "#878ca6",
+  jev: "#ff2e97", cyan: "#22d3ee", amber: "#f8b74d", green: "#34d39a", red: "#fb5c6c", violet: "#a986ff",
+};
+const LANE_COLOR: Record<string, string> = {
+  haiku: C.green, sonnet: C.cyan, opus: C.violet, fable: C.jev, tool: "#7f88b0", review: C.amber,
+};
+const LANE_LABEL: Record<string, string> = {
+  haiku: "HAIKU", sonnet: "SONNET", opus: "OPUS", fable: "FABLE", tool: "TOOL · DET", review: "REVIEW",
+};
+const ACTION_COLOR: Record<string, string> = {
+  "carry on": "#6b7192", investigate: C.cyan, "join in": C.green, flee: C.red, "warn others": C.amber,
+};
+const OPUS_BASELINE = 0.012; // assumed $/task if everything went to Opus — the savings yardstick
+const REFLEX_LANES_C = 5;
+const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// --- dom + canvas ----------------------------------------------------------
+const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
+const canvas = $("#stage") as HTMLCanvasElement;
+const ctx = canvas.getContext("2d")!;
+const hud = $("#hud");
+const dock = $("#dock");
+const note = $("#note");
+const badge = $("#badge");
+const badgeText = $("#badge-text");
+const sub = $("#sub");
+let W = 0, H = 0;
+
+function fit() {
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const r = canvas.getBoundingClientRect();
+  W = r.width; H = r.height;
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  scene?.resize();
+}
+addEventListener("resize", fit);
+
+// --- draw helpers ----------------------------------------------------------
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+const ease = (t: number) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
+const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+const esc = (s: string) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] ?? c));
+function rr(x: number, y: number, w: number, h: number, rad: number) {
+  ctx.beginPath();
+  (ctx as any).roundRect ? (ctx as any).roundRect(x, y, w, h, rad) : ctx.rect(x, y, w, h);
+}
+function bgGrid() {
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = "rgba(255,255,255,0.025)";
+  ctx.lineWidth = 1;
+  const step = 44;
+  ctx.beginPath();
+  for (let x = (0); x < W; x += step) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = 0; y < H; y += step) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+}
+function glow(color: string, blur: number, fn: () => void) {
+  ctx.save(); ctx.shadowColor = color; ctx.shadowBlur = blur; fn(); ctx.restore();
+}
+function text(s: string, x: number, y: number, font: string, color: string, align: CanvasTextAlign = "left") {
+  ctx.font = font; ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = "middle";
+  ctx.fillText(s, x, y);
+}
+const D = (s: number) => `600 ${s}px "Chakra Petch", sans-serif`;
+const M = (s: number) => `500 ${s}px "IBM Plex Mono", monospace`;
+
+function tiles(items: { k: string; v: string; sub?: string; color?: string }[]) {
+  hud.innerHTML = "";
+  for (const it of items) {
+    const t = document.createElement("div");
+    t.className = "tile";
+    t.innerHTML = `<div class="k">${it.k}</div><div class="v" style="color:${it.color ?? C.text}">${it.v}${it.sub ? ` <small>${it.sub}</small>` : ""}</div>`;
+    hud.appendChild(t);
+  }
+}
+function setTile(i: number, v: string) {
+  const el = hud.children[i]?.querySelector<HTMLElement>(".v");
+  if (el) el.childNodes[0] && (el.childNodes[0].nodeValue = v);
+}
+
+// --- scene framework -------------------------------------------------------
+interface Scene {
+  enter(): void;
+  exit(): void;
+  message(m: ServerMsg): void;
+  frame(dt: number, now: number): void;
+  resize(): void;
+}
+let scene: Scene | null = null;
+function activate(s: Scene) {
+  scene?.exit();
+  hud.innerHTML = ""; dock.innerHTML = ""; note.textContent = "";
+  scene = s;
+  s.resize(); s.enter();
+}
+
+// ===========================================================================
+// ROUTER
+// ===========================================================================
+interface Packet { kind: string; lane: string; conf: number; t: number; sx: number; sy: number; cx: number; cy: number; ex: number; ey: number; }
+class RouterScene implements Scene {
+  private packets: Packet[] = [];
+  private coreX = 0; private coreY = 0; private coreR = 46;
+  private ends: Record<string, { x: number; y: number; hit: number }> = {};
+  private total = 0;
+  private perLane: Record<string, number> = {};
+  private lat: number[] = [];
+  private cost = 0; private saved = 0;
+  private stamps: number[] = [];
+  private spin = 0;
+  private feed: HTMLElement | null = null;
+  private running = false;
+
+  resize() {
+    this.coreX = W * (W < 620 ? 0.28 : 0.34);
+    this.coreY = H * 0.52;
+    this.coreR = clamp(Math.min(W, H) * 0.06, 34, 52);
+    const keys = [...ROUTER_LANES, "review"];
+    const x = W * (W < 620 ? 0.9 : 0.84);
+    const top = H * 0.15, bot = H * 0.8;
+    keys.forEach((k, i) => {
+      const y = lerp(top, bot, i / (keys.length - 1));
+      this.ends[k] = { x, y, hit: this.ends[k]?.hit ?? 0 };
+      this.perLane[k] ??= 0;
+    });
+  }
+  enter() {
+    this.running = false;
+    send({ type: "scene", scene: "router" }); // server starts PAUSED — no calls until Start
+    tiles([
+      { k: "decisions", v: "0" },
+      { k: "throughput", v: "0", sub: "/s", color: C.jev },
+      { k: "avg latency", v: "—", sub: "ms", color: C.cyan },
+      { k: "spent", v: "$0.00" },
+      { k: "saved vs opus", v: "$0.00", color: C.green },
+    ]);
+    // controls: Start/Pause + speed
+    const panel = document.createElement("div");
+    panel.className = "panel controls";
+    panel.innerHTML = `
+      <button class="btn" id="rt-toggle">▶ Start</button>
+      <label>speed <span id="rt-rn">3</span>/s</label>
+      <input type="range" id="rt-rate" min="1" max="8" step="1" value="3" />
+      <span class="chip" id="rt-status">paused · idle</span>`;
+    dock.appendChild(panel);
+    const toggle = $("#rt-toggle") as HTMLButtonElement;
+    toggle.onclick = () => {
+      this.running = !this.running;
+      send({ type: "router.run", on: this.running });
+      toggle.textContent = this.running ? "⏸ Pause" : "▶ Start";
+      toggle.classList.toggle("ghost", this.running);
+      ($("#rt-status")).textContent = this.running ? "running — live calls" : "paused · idle";
+    };
+    ($("#rt-rate") as HTMLInputElement).oninput = (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      $("#rt-rn").textContent = String(v);
+      send({ type: "router.rate", perSec: v });
+    };
+    // live decision feed
+    this.feed = document.createElement("div");
+    Object.assign(this.feed.style, {
+      position: "absolute", left: "16px", top: "210px", width: "360px", maxWidth: "44vw",
+      background: "color-mix(in srgb, #12131d 90%, transparent)", backdropFilter: "blur(8px)",
+      border: "1px solid #242637", borderRadius: "12px", padding: "10px 12px",
+      pointerEvents: "none", fontFamily: "var(--mono)", fontSize: "11px", zIndex: "3",
+    } as CSSStyleDeclaration);
+    this.feed.innerHTML = `<div style="font-family:var(--display);font-size:11px;letter-spacing:.08em;color:#878ca6;text-transform:uppercase;margin-bottom:2px">Decision feed</div>`;
+    document.querySelector("main")!.appendChild(this.feed);
+    note.textContent = "Press Start to route (paused by default — no calls until you do). Jev answers 3 questions per task: model · needs-human? · risk. Low confidence escalates to REVIEW.";
+  }
+  exit() {
+    this.running = false;
+    this.feed?.remove();
+    this.feed = null;
+  }
+  message(m: ServerMsg) {
+    if (m.type !== "router.decision") return;
+    const d: RouterDecision = m.d;
+    const key = d.escalated ? "review" : d.lane;
+    const e = this.ends[key] ?? this.ends["tool"]!;
+    const midx = (this.coreX + e.x) / 2;
+    const midy = (this.coreY + e.y) / 2 - (e.y - this.coreY) * 0.15 - 40;
+    this.packets.push({ kind: d.kind, lane: key, conf: d.confidence, t: 0, sx: this.coreX, sy: this.coreY, cx: midx, cy: midy, ex: e.x, ey: e.y });
+    if (this.packets.length > 60) this.packets.shift();
+    this.total++;
+    this.perLane[key] = (this.perLane[key] ?? 0) + 1;
+    this.lat.push(d.latencyMs); if (this.lat.length > 40) this.lat.shift();
+    this.cost += d.costUsd;
+    this.saved += Math.max(0, OPUS_BASELINE - d.costUsd);
+    this.stamps.push(performance.now());
+    // live feed row: what it actually decided on
+    if (this.feed) {
+      const col = LANE_COLOR[key]!;
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:8px;align-items:center;padding:4px 0;border-top:1px solid rgba(255,255,255,0.06)";
+      row.innerHTML =
+        `<span style="width:7px;height:7px;border-radius:50%;background:${col};box-shadow:0 0 6px ${col};flex:0 0 auto"></span>` +
+        `<span style="flex:1;color:#cfd3e6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.task)}</span>` +
+        `<span style="color:${col};text-transform:uppercase;font-size:10px;flex:0 0 auto">${LANE_LABEL[key]}</span>` +
+        `<span style="color:#878ca6;flex:0 0 auto">${Math.round(d.confidence * 100)}%</span>`;
+      this.feed.firstElementChild!.after(row);
+      while (this.feed.children.length > 9) this.feed.lastElementChild!.remove();
+    }
+  }
+  frame(dt: number, now: number) {
+    bgGrid();
+    this.spin += dt * 0.4;
+    // intake stream (ambient)
+    if (!REDUCED) {
+      ctx.fillStyle = "rgba(255,46,151,0.5)";
+      for (let i = 0; i < 5; i++) {
+        const p = ((now * 0.00018 + i / 5) % 1);
+        const x = lerp(0, this.coreX, p), y = this.coreY + Math.sin(p * 6 + i) * 26;
+        ctx.globalAlpha = 0.5 * (1 - Math.abs(p - 0.5) * 1.2);
+        ctx.beginPath(); ctx.arc(x, y, 2.4, 0, 7); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+    // lanes
+    for (const k of [...ROUTER_LANES, "review"]) {
+      const e = this.ends[k]!, col = LANE_COLOR[k]!;
+      const glowAmt = clamp((300 - (now - e.hit)) / 300, 0, 1);
+      // rail from core to lane
+      ctx.strokeStyle = `rgba(255,255,255,${0.05 + glowAmt * 0.12})`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(this.coreX + this.coreR, this.coreY);
+      ctx.quadraticCurveTo((this.coreX + e.x) / 2, (this.coreY + e.y) / 2 - (e.y - this.coreY) * 0.15 - 40, e.x - 60, e.y);
+      ctx.stroke();
+      // endpoint pill
+      const w = W < 620 ? 92 : 128, h = 34;
+      glow(col, glowAmt * 22, () => {
+        rr(e.x - w + 20, e.y - h / 2, w, h, 9);
+        ctx.fillStyle = `color-mix(in srgb, ${col} ${12 + glowAmt * 26}%, ${C.panel})`;
+        ctx.fill();
+        ctx.strokeStyle = col; ctx.globalAlpha = 0.4 + glowAmt * 0.6; ctx.lineWidth = 1.5; ctx.stroke(); ctx.globalAlpha = 1;
+      });
+      text(LANE_LABEL[k]!, e.x - w + 32, e.y - 5, D(12), C.text);
+      text(String(this.perLane[k] ?? 0), e.x - w + 32, e.y + 9, M(11), col);
+    }
+    // core
+    glow(C.jev, 28, () => {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = this.spin + (i / 6) * Math.PI * 2;
+        const px = this.coreX + Math.cos(a) * this.coreR, py = this.coreY + Math.sin(a) * this.coreR;
+        i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = "#170a15"; ctx.fill();
+      ctx.strokeStyle = C.jev; ctx.lineWidth = 2; ctx.stroke();
+    });
+    text("JEV", this.coreX, this.coreY - 5, D(17), "#fff", "center");
+    text("system-one", this.coreX, this.coreY + 12, M(9), C.muted, "center");
+    // packets
+    const spd = REDUCED ? 3 : 1.6;
+    for (const p of this.packets) {
+      p.t = clamp(p.t + dt * spd, 0, 1);
+      const t = ease(p.t);
+      const x = lerp(lerp(p.sx, p.cx, t), lerp(p.cx, p.ex - 60, t), t);
+      const y = lerp(lerp(p.sy, p.cy, t), lerp(p.cy, p.ey, t), t);
+      const col = LANE_COLOR[p.lane]!;
+      const alpha = p.t < 0.12 ? p.t / 0.12 : p.t > 0.9 ? (1 - p.t) / 0.1 : 1;
+      ctx.globalAlpha = alpha;
+      glow(col, 10, () => { ctx.beginPath(); ctx.arc(x, y, 4.5, 0, 7); ctx.fillStyle = col; ctx.fill(); });
+      ctx.globalAlpha = alpha * 0.9;
+      text(p.kind, x + 9, y, M(10.5), C.text);
+      ctx.globalAlpha = 1;
+      if (p.t >= 1) this.ends[p.lane]!.hit = now;
+    }
+    this.packets = this.packets.filter((p) => p.t < 1);
+    // hud
+    const cutoff = performance.now() - 1000;
+    this.stamps = this.stamps.filter((s) => s > cutoff);
+    setTile(0, String(this.total));
+    setTile(1, String(this.stamps.length));
+    setTile(2, this.lat.length ? String(Math.round(this.lat.reduce((a, b) => a + b, 0) / this.lat.length)) : "—");
+    setTile(3, "$" + this.cost.toFixed(this.cost < 0.01 ? 5 : 2));
+    setTile(4, "$" + this.saved.toFixed(2));
+  }
+}
+
+// ===========================================================================
+// SWARM
+// ===========================================================================
+interface Agent { x: number; y: number; tx: number; ty: number; color: string; action?: string; conf: number; pop: number; }
+class SwarmScene implements Scene {
+  private agents = new Map<number, Agent>();
+  private event = ""; private count = 200;
+  private tally: Record<string, number> = {};
+  private ring = 0; private ringOn = false;
+  private start = 0; private done = 0; private reacted = 0;
+
+  resize() {}
+  enter() {
+    tiles([
+      { k: "agents", v: "0" },
+      { k: "reacted", v: "0", color: C.jev },
+      { k: "elapsed", v: "0", sub: "ms", color: C.cyan },
+    ]);
+    const presets = ["fire sale at the bakery, everything must go!", "everyone who doesn't reach the fountain will be bitten by a snake", "a royal parade is starting in the square", "the well water has gone bad — do not drink"];
+    dock.innerHTML = "";
+    const panel = document.createElement("div"); panel.className = "panel controls";
+    panel.innerHTML = `
+      <label>broadcast</label>
+      <input type="text" id="sw-event" value="${presets[0]}" />
+      <label>agents <span id="sw-n">200</span></label>
+      <input type="range" id="sw-count" min="50" max="500" step="50" value="200" />
+      <button class="btn" id="sw-go">Broadcast ▸</button>`;
+    dock.appendChild(panel);
+    const chipRow = document.createElement("div"); chipRow.className = "panel"; chipRow.style.display = "flex"; chipRow.style.gap = "6px"; chipRow.style.flexWrap = "wrap";
+    presets.forEach((p) => { const c = document.createElement("span"); c.className = "chip"; c.textContent = p.length > 26 ? p.slice(0, 24) + "…" : p; c.onclick = () => { ($("#sw-event") as HTMLInputElement).value = p; }; chipRow.appendChild(c); });
+    dock.appendChild(chipRow);
+    ($("#sw-count") as HTMLInputElement).oninput = (e) => { $("#sw-n").textContent = (e.target as HTMLInputElement).value; };
+    $("#sw-go").onclick = () => {
+      send({ type: "swarm.broadcast", event: ($("#sw-event") as HTMLInputElement).value || "something is happening", count: Number(($("#sw-count") as HTMLInputElement).value) });
+    };
+    note.textContent = "One broadcast → N Jev decisions fired in parallel. Each dot is one real decision; halo = confidence.";
+    send({ type: "scene", scene: "swarm" });
+  }
+  exit() {}
+  message(m: ServerMsg) {
+    if (m.type === "swarm.init") {
+      this.agents.clear(); this.tally = {}; this.reacted = 0; this.done = 0;
+      this.event = m.event; this.start = performance.now(); this.ring = 0; this.ringOn = true;
+      const pad = 60;
+      for (const a of m.agents as SwarmAgentInit[]) {
+        const x = lerp(pad, W - pad, a.x), y = lerp(pad + 40, H - 80, a.y);
+        this.agents.set(a.id, { x, y, tx: x, ty: y, color: "#3a3f57", conf: 0, pop: 0 });
+      }
+      setTile(0, String(m.agents.length));
+    } else if (m.type === "swarm.reaction") {
+      const r: SwarmReaction = m.r; const a = this.agents.get(r.id); if (!a) return;
+      a.action = r.action; a.conf = r.confidence; a.color = ACTION_COLOR[r.action] ?? C.muted; a.pop = 1;
+      const cx = W / 2, cy = H / 2;
+      const dx = a.x - cx, dy = a.y - cy, len = Math.hypot(dx, dy) || 1;
+      const push = (d: number) => { a.tx = clamp(a.x + (dx / len) * d, 30, W - 30); a.ty = clamp(a.y + (dy / len) * d, 60, H - 60); };
+      if (r.action === "flee") push(80 + Math.random() * 60);
+      else if (r.action === "join in") { a.tx = lerp(a.x, cx, 0.5 + Math.random() * 0.3); a.ty = lerp(a.y, cy, 0.5 + Math.random() * 0.3); }
+      else if (r.action === "investigate") { a.tx = lerp(a.x, cx, 0.2); a.ty = lerp(a.y, cy, 0.2); }
+      else if (r.action === "warn others") { a.tx = a.x + (Math.random() - 0.5) * 40; a.ty = a.y + (Math.random() - 0.5) * 40; }
+      this.tally[r.action] = (this.tally[r.action] ?? 0) + 1; this.reacted++;
+    } else if (m.type === "swarm.done") this.done = performance.now();
+  }
+  frame(dt: number, now: number) {
+    bgGrid();
+    if (this.ringOn) {
+      this.ring += dt * 620;
+      ctx.strokeStyle = `rgba(255,46,151,${clamp(1 - this.ring / (Math.max(W, H)), 0, 1) * 0.6})`;
+      ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(W / 2, H / 2, this.ring, 0, 7); ctx.stroke();
+      if (this.ring > Math.max(W, H)) this.ringOn = false;
+    }
+    for (const a of this.agents.values()) {
+      a.x += (a.tx - a.x) * Math.min(1, dt * 6); a.y += (a.ty - a.y) * Math.min(1, dt * 6);
+      if (a.pop > 0) a.pop = Math.max(0, a.pop - dt * 2.2);
+      if (a.action && a.conf > 0) { ctx.globalAlpha = 0.16 * a.conf; ctx.beginPath(); ctx.arc(a.x, a.y, 8 + a.conf * 7, 0, 7); ctx.fillStyle = a.color; ctx.fill(); ctx.globalAlpha = 1; }
+      const r = 3 + a.pop * 4;
+      glow(a.action ? a.color : "transparent", a.action ? 8 : 0, () => { ctx.beginPath(); ctx.arc(a.x, a.y, r, 0, 7); ctx.fillStyle = a.color; ctx.fill(); });
+    }
+    if (this.event) text(`“${this.event}”`, W / 2, 34, D(W < 620 ? 13 : 16), "#fff", "center");
+    // tally legend top-right (clear of the HUD tiles and the bottom dock)
+    const lx = Math.max(W - 300, W * 0.5);
+    let ly = 100;
+    const max = Math.max(1, ...Object.values(this.tally));
+    for (const act of SWARM_ACTIONS) {
+      const n = this.tally[act] ?? 0, col = ACTION_COLOR[act]!;
+      ctx.fillStyle = col; ctx.globalAlpha = 0.9; rr(lx, ly, 9, 9, 2); ctx.fill(); ctx.globalAlpha = 1;
+      text(act, lx + 16, ly + 5, M(11), C.text);
+      const bw = 120 * (n / max);
+      ctx.fillStyle = "rgba(255,255,255,0.08)"; rr(lx + 108, ly, 120, 9, 3); ctx.fill();
+      ctx.fillStyle = col; rr(lx + 108, ly, Math.max(2, bw), 9, 3); ctx.fill();
+      text(String(n), lx + 236, ly + 5, M(11), C.muted);
+      ly += 24;
+    }
+    setTile(1, String(this.reacted));
+    setTile(2, this.done ? String(Math.round(this.done - this.start)) : this.start ? String(Math.round(now - this.start)) : "0");
+  }
+}
+
+// ===========================================================================
+// GAUNTLET
+// ===========================================================================
+class GauntletScene implements Scene {
+  private results: GauntletResult[] = [];
+  private total = 8;
+  private jev = { n: 0, ok: 0, lat: 0, cost: 0 };
+  private llm = { n: 0, ok: 0, lat: 0, cost: 0 };
+  private running = false;
+  private anims: { i: number; row: number; ok: boolean; pop: number }[] = [];
+
+  resize() {}
+  enter() {
+    dock.innerHTML = "";
+    const panel = document.createElement("div"); panel.className = "panel controls";
+    panel.innerHTML = `
+      <label>tasks <span id="g-n">8</span></label>
+      <input type="range" id="g-count" min="4" max="16" step="1" value="8" />
+      <button class="btn" id="g-go">Run gauntlet ▸</button>`;
+    dock.appendChild(panel);
+    ($("#g-count") as HTMLInputElement).oninput = (e) => { $("#g-n").textContent = (e.target as HTMLInputElement).value; };
+    $("#g-go").onclick = () => {
+      this.results = []; this.anims = []; this.jev = { n: 0, ok: 0, lat: 0, cost: 0 }; this.llm = { n: 0, ok: 0, lat: 0, cost: 0 };
+      this.total = Number(($("#g-count") as HTMLInputElement).value); this.running = true;
+      send({ type: "gauntlet.start", count: this.total });
+    };
+    note.textContent = "Same labeled tasks → Jev vs Claude. Ticks: green = matched ground truth, red = missed. The bars are what the hype videos never show.";
+    send({ type: "scene", scene: "gauntlet" });
+  }
+  exit() {}
+  message(m: ServerMsg) {
+    if (m.type === "gauntlet.result") {
+      const r = m.r; this.results.push(r);
+      this.jev.n++; this.jev.ok += r.jev.correct ? 1 : 0; this.jev.lat += r.jev.latencyMs; this.jev.cost += r.jev.costUsd;
+      this.llm.n++; this.llm.ok += r.llm.correct ? 1 : 0; this.llm.lat += r.llm.latencyMs; this.llm.cost += r.llm.costUsd;
+      this.anims.push({ i: r.id, row: 0, ok: r.jev.correct, pop: 1 });
+      this.anims.push({ i: r.id, row: 1, ok: r.llm.correct, pop: 1 });
+    } else if (m.type === "gauntlet.done") this.running = false;
+  }
+  private track(label: string, color: string, y: number, side: { n: number; ok: number; lat: number; cost: number }, row: number, now: number) {
+    const x0 = 120, x1 = W * 0.62, tw = x1 - x0;
+    text(label, 24, y, D(15), color);
+    text(`${side.n ? Math.round((side.ok / side.n) * 100) : 0}% acc`, 24, y + 18, M(11), C.muted);
+    ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1;
+    rr(x0, y - 12, tw, 24, 6); ctx.stroke();
+    const cellW = tw / this.total;
+    for (let i = 0; i < this.results.length; i++) {
+      const r = this.results[i]!; const ok = row === 0 ? r.jev.correct : r.llm.correct;
+      const anim = this.anims.find((a) => a.i === r.id && a.row === row);
+      const pop = anim ? anim.pop : 0;
+      const cx = x0 + cellW * i + 3, cw = cellW - 6;
+      ctx.globalAlpha = 0.85;
+      glow(ok ? C.green : C.red, pop * 12, () => { rr(cx, y - 8, cw, 16, 4); ctx.fillStyle = ok ? C.green : C.red; ctx.fill(); });
+      ctx.globalAlpha = 1;
+    }
+  }
+  private bar(label: string, y: number, jevVal: number, llmVal: number, fmt: (n: number) => string, lowerBetter: boolean) {
+    const x0 = W * 0.66, w = Math.min(W * 0.3, W - x0 - 24);
+    text(label, x0, y - 14, M(10.5), C.muted);
+    const max = Math.max(jevVal, llmVal, 1e-9);
+    const rows: [string, number, string][] = [["JEV", jevVal, C.jev], ["CLA", llmVal, C.cyan]];
+    rows.forEach(([nm, val, col], i) => {
+      const yy = y + i * 20;
+      ctx.fillStyle = "rgba(255,255,255,0.07)"; rr(x0 + 34, yy - 7, w - 34, 12, 4); ctx.fill();
+      const bw = (w - 34) * (val / max);
+      glow(col, 8, () => { ctx.fillStyle = col; rr(x0 + 34, yy - 7, Math.max(3, bw), 12, 4); ctx.fill(); });
+      text(nm, x0, yy, M(10), col);
+      text(fmt(val), x0 + 40 + Math.max(3, bw), yy, M(10), C.text);
+    });
+    const winner = lowerBetter ? (jevVal <= llmVal ? "JEV" : "CLA") : (jevVal >= llmVal ? "JEV" : "CLA");
+    text(`▲ ${winner}`, x0 + w - 4, y - 14, M(9.5), winner === "JEV" ? C.jev : C.cyan, "right");
+  }
+  frame(dt: number, now: number) {
+    bgGrid();
+    for (const a of this.anims) a.pop = Math.max(0, a.pop - dt * 1.5);
+    text("THE GAUNTLET", 24, 40, D(18), "#fff");
+    text(this.running ? "running…" : this.results.length ? "complete" : "press run", 200, 40, M(11), this.running ? C.amber : C.muted);
+    this.track("JEV", C.jev, H * 0.34, this.jev, 0, now);
+    this.track("CLAUDE", C.cyan, H * 0.60, this.llm, 1, now);
+    const jAcc = this.jev.n ? (this.jev.ok / this.jev.n) * 100 : 0;
+    const lAcc = this.llm.n ? (this.llm.ok / this.llm.n) * 100 : 0;
+    this.bar("ACCURACY  (higher = better)", H * 0.28, jAcc, lAcc, (n) => n.toFixed(0) + "%", false);
+    this.bar("AVG LATENCY  (lower = better)", H * 0.48, this.jev.n ? this.jev.lat / this.jev.n : 0, this.llm.n ? this.llm.lat / this.llm.n : 0, (n) => Math.round(n) + "ms", true);
+    this.bar("TOTAL COST  (lower = better)", H * 0.68, this.jev.cost, this.llm.cost, (n) => "$" + n.toFixed(4), true);
+  }
+}
+
+// ===========================================================================
+// REFLEX — Jev pilots a craft through scrolling gates, one decision per tick.
+// ===========================================================================
+class ReflexScene implements Scene {
+  private f: ReflexFrame | null = null;
+  private running = false;
+  private craftLane = 2;
+  private gy = new Map<number, number>();
+  private flash = 0; private shake = 0;
+  private lat: number[] = []; private stamps: number[] = []; private total = 0;
+  private trail: { x: number; y: number; a: number }[] = [];
+
+  private geom() {
+    const playW = Math.min(W * 0.5, 460);
+    const x0 = W / 2 - playW / 2;
+    return { playW, x0, laneW: playW / REFLEX_LANES_C, craftY: H * 0.82, topY: H * 0.14 };
+  }
+  private laneX(lane: number) { const g = this.geom(); return g.x0 + (lane + 0.5) * g.laneW; }
+  private distToY(dist: number) { const g = this.geom(); return g.craftY - (clamp(dist, 0, 9) / 9) * (g.craftY - g.topY); }
+
+  resize() {}
+  enter() {
+    this.f = null; this.running = false; this.craftLane = 2; this.gy.clear();
+    this.total = 0; this.lat = []; this.stamps = []; this.trail = [];
+    send({ type: "scene", scene: "reflex" });
+    tiles([
+      { k: "distance", v: "0", color: C.jev },
+      { k: "crashes", v: "0", color: C.red },
+      { k: "decisions/s", v: "0" },
+      { k: "reflex", v: "—", sub: "ms", color: C.cyan },
+    ]);
+    const panel = document.createElement("div");
+    panel.className = "panel controls";
+    panel.innerHTML = `
+      <button class="btn" id="rx-toggle">▶ Start</button>
+      <label>speed <span id="rx-rn">4</span>/s</label>
+      <input type="range" id="rx-rate" min="1" max="10" step="1" value="4" />
+      <span class="chip" id="rx-status">paused · idle</span>`;
+    dock.appendChild(panel);
+    const t = $("#rx-toggle") as HTMLButtonElement;
+    t.onclick = () => {
+      this.running = !this.running;
+      send({ type: "reflex.run", on: this.running });
+      t.textContent = this.running ? "⏸ Pause" : "▶ Start";
+      t.classList.toggle("ghost", this.running);
+      ($("#rx-status")).textContent = this.running ? "flying — live calls" : "paused · idle";
+    };
+    ($("#rx-rate") as HTMLInputElement).oninput = (e) => {
+      const v = Number((e.target as HTMLInputElement).value);
+      $("#rx-rn").textContent = String(v);
+      send({ type: "reflex.rate", perSec: v });
+    };
+    note.textContent = "Jev pilots the craft — one real decision per tick. It sees the gates ahead and steers for a clear lane. The environment generates its own endless data. Starts paused.";
+  }
+  exit() { this.running = false; }
+  message(m: ServerMsg) {
+    if (m.type !== "reflex.frame") return;
+    this.f = m.f; this.total++; this.stamps.push(performance.now());
+    this.lat.push(m.f.latencyMs); if (this.lat.length > 30) this.lat.shift();
+    if (m.f.crashed) { this.flash = 1; this.shake = 1; }
+    const ids = new Set(m.f.gates.map((gg) => gg.id));
+    for (const k of [...this.gy.keys()]) if (!ids.has(k)) this.gy.delete(k);
+  }
+  frame(dt: number, now: number) {
+    bgGrid();
+    const g = this.geom();
+    this.shake = Math.max(0, this.shake - dt * 3);
+    ctx.save();
+    ctx.translate((Math.random() - 0.5) * this.shake * 10, 0);
+    for (let i = 0; i < REFLEX_LANES_C; i++) {
+      const x = this.laneX(i);
+      ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, g.topY); ctx.lineTo(x, g.craftY + 20); ctx.stroke();
+    }
+    ctx.strokeStyle = "rgba(255,46,151,0.25)"; ctx.beginPath(); ctx.moveTo(g.x0, g.craftY); ctx.lineTo(g.x0 + g.playW, g.craftY); ctx.stroke();
+    const f = this.f;
+    if (f) {
+      const nearest = f.gates.reduce((m, gg) => Math.min(m, gg.dist), Infinity);
+      for (const gate of f.gates) {
+        const ty = this.distToY(gate.dist);
+        let ry = this.gy.get(gate.id); if (ry === undefined) ry = ty - 24;
+        ry += (ty - ry) * Math.min(1, dt * 7); this.gy.set(gate.id, ry);
+        const near = gate.dist === nearest;
+        for (const lane of gate.blocked) {
+          const x = this.laneX(lane) - g.laneW / 2 + 3;
+          glow(C.red, near ? 14 : 3, () => { rr(x, ry! - 11, g.laneW - 6, 22, 5); ctx.fillStyle = near ? "rgba(251,92,108,0.92)" : "rgba(251,92,108,0.42)"; ctx.fill(); });
+        }
+        if (near) for (const lane of [0, 1, 2, 3, 4].filter((l) => !gate.blocked.includes(l))) {
+          const x = this.laneX(lane); ctx.strokeStyle = "rgba(52,211,154,0.55)"; ctx.lineWidth = 1.5;
+          rr(x - g.laneW / 2 + 4, ry! - 11, g.laneW - 8, 22, 5); ctx.stroke();
+        }
+      }
+    }
+    const target = f ? f.craft : 2;
+    this.craftLane += (target - this.craftLane) * Math.min(1, dt * 9);
+    const cx = this.laneX(this.craftLane), cy = g.craftY;
+    if (!REDUCED && this.running) this.trail.push({ x: cx, y: cy + 8, a: 1 });
+    for (const p of this.trail) { p.a -= dt * 2; p.y += dt * 40; }
+    this.trail = this.trail.filter((p) => p.a > 0);
+    for (const p of this.trail) { ctx.globalAlpha = p.a * 0.5; ctx.fillStyle = C.jev; ctx.beginPath(); ctx.arc(p.x, p.y, 3 * p.a, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    glow(C.jev, 18, () => { ctx.beginPath(); ctx.moveTo(cx, cy - 14); ctx.lineTo(cx - 11, cy + 12); ctx.lineTo(cx + 11, cy + 12); ctx.closePath(); ctx.fillStyle = "#ff2e97"; ctx.fill(); });
+    if (f) {
+      text(f.choice === "left" ? "◄" : f.choice === "right" ? "►" : "■", cx, cy + 34, D(16), C.jev, "center");
+      const g0 = [...f.gates].sort((a, b) => a.dist - b.dist)[0];
+      if (g0) {
+        const clear = [0, 1, 2, 3, 4].filter((l) => !g0.blocked.includes(l));
+        text(`NEXT GATE  d${g0.dist} · clear [${clear.join(",")}]  →  ${f.choice.toUpperCase()} ${Math.round(f.confidence * 100)}%`, W / 2, g.topY - 18, M(11.5), "#cfd3e6", "center");
+      }
+    }
+    ctx.restore();
+    if (this.flash > 0) {
+      ctx.fillStyle = `rgba(251,92,108,${this.flash * 0.28})`; ctx.fillRect(0, 0, W, H);
+      text("CRASH", W / 2, H * 0.4, D(40), `rgba(251,92,108,${this.flash})`, "center");
+      this.flash = Math.max(0, this.flash - dt * 1.6);
+    }
+    const cutoff = performance.now() - 1000; this.stamps = this.stamps.filter((s) => s > cutoff);
+    if (f) { setTile(0, String(f.distance)); setTile(1, String(f.crashes)); }
+    setTile(2, String(this.stamps.length));
+    setTile(3, this.lat.length ? String(Math.round(this.lat.reduce((a, b) => a + b, 0) / this.lat.length)) : "—");
+  }
+}
+
+// --- scenes registry + tabs ------------------------------------------------
+const scenes: Record<string, Scene> = { router: new RouterScene(), reflex: new ReflexScene(), swarm: new SwarmScene(), gauntlet: new GauntletScene() };
+document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll("#tabs button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+    activate(scenes[b.dataset.scene!]!);
+  };
+});
+
+// --- ledger (session totals + scrollable transaction history) --------------
+const SCENE_COLOR: Record<string, string> = { router: C.jev, swarm: C.violet, gauntlet: C.cyan };
+const fmtTok = (n: number) => (n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "K" : String(Math.round(n)));
+const ledger = (() => {
+  const list = $("#lg-list"), drawer = $("#ledger");
+  const reqEl = $("#lg-req"), tokEl = $("#lg-tok"), costEl = $("#lg-cost");
+  let req = 0, tok = 0, cost = 0;
+  ($("#ledger-toggle") as HTMLButtonElement).onclick = () => { drawer.hidden = !drawer.hidden; };
+  ($("#lg-clear") as HTMLButtonElement).onclick = () => { list.innerHTML = ""; };
+  function add(e: TxEntry) {
+    req++; tok += e.inputTokens; if (e.live) cost += e.costUsd;
+    reqEl.textContent = String(req);
+    tokEl.textContent = fmtTok(tok);
+    costEl.textContent = cost.toFixed(cost < 0.01 ? 5 : 4);
+    const col = SCENE_COLOR[e.scene] ?? C.muted;
+    const time = new Date(e.ts).toLocaleTimeString([], { hour12: false });
+    const row = document.createElement("div");
+    row.className = "lx";
+    row.innerHTML =
+      `<div class="top"><span class="scene" style="color:${col};border-color:${col}55">${e.scene}</span>` +
+      `<span class="in">${esc(e.input)}</span>` +
+      (e.live ? "" : `<span class="sim">SIM</span>`) + `</div>` +
+      `<div class="sum">${esc(e.summary)}</div>` +
+      `<div class="meta"><span>${time}</span><span>${Math.round(e.latencyMs)}ms</span><span>${fmtTok(e.inputTokens)} tok</span><span>$${e.costUsd.toFixed(6)}</span><span style="color:${col}">${esc(e.transport)}</span></div>`;
+    row.onclick = () => row.classList.toggle("open");
+    list.prepend(row);
+    while (list.children.length > 300) list.lastElementChild!.remove();
+  }
+  return { add };
+})();
+
+// --- websocket -------------------------------------------------------------
+let ws: WebSocket | null = null;
+function send(m: import("../shared/protocol").ClientMsg) { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); }
+function connect() {
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`);
+  ws.onopen = () => { if (!scene) activate(scenes.router!); else send({ type: "scene", scene: currentScene() }); };
+  ws.onmessage = (ev) => {
+    const m: ServerMsg = JSON.parse(ev.data);
+    if (m.type === "reload") { location.reload(); return; } // dev hot reload
+    if (m.type === "health") applyHealth(m.health);
+    else if (m.type === "tx") ledger.add(m.e);
+    else scene?.message(m);
+  };
+  ws.onclose = () => { badge.dataset.mode = "sim"; badgeText.textContent = "reconnecting…"; setTimeout(connect, 1200); };
+}
+function currentScene(): "router" | "swarm" | "gauntlet" {
+  const sel = document.querySelector('#tabs button[aria-selected="true"]') as HTMLButtonElement | null;
+  return (sel?.dataset.scene as any) ?? "router";
+}
+function applyHealth(h: Health) {
+  badge.dataset.mode = h.mode;
+  badgeText.textContent = h.mode === "live" ? h.note : "SIM MODE";
+  sub.textContent = h.mode === "live" ? h.jevModel : "no key · simulated";
+  if (h.mode === "sim") note.textContent = "SIM · decisions generated locally. Add a TypeSafe or OpenRouter key to go LIVE. " + note.textContent;
+}
+
+// --- boot ------------------------------------------------------------------
+fit();
+connect();
+let last = performance.now();
+function loop(now: number) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  scene?.frame(dt, now);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
