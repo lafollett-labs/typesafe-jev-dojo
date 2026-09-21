@@ -92,11 +92,13 @@ const ROUTER_TASKS: RouterTask[] = [
   { text: "Write a friendly 2-line reply confirming the appointment.", kind: "reply", lane: "haiku", risk: 0.4 },
   { text: "Add pagination to the /orders endpoint and its tests.", kind: "code", lane: "sonnet", risk: 1.2 },
   { text: "Draft release notes from these 14 merged PRs.", kind: "draft", lane: "sonnet", risk: 0.8 },
-  { text: "Design the sharding strategy for the events table at 40TB.", kind: "architecture", lane: "opus", risk: 2.6 },
-  { text: "Review this auth middleware for privilege-escalation bugs.", kind: "security", lane: "opus", risk: 3.0 },
-  { text: "Should we grant this IAM role s3:DeleteBucket? Explain risk.", kind: "security", lane: "opus", risk: 3.2 },
-  { text: "Write a punchy launch tweet for the new pricing page.", kind: "creative", lane: "fable", risk: 0.6 },
-  { text: "Brainstorm 10 cold-open ideas for the demo video.", kind: "creative", lane: "fable", risk: 0.5 },
+  { text: "Design the sharding strategy for the events table at 40TB.", kind: "architecture", lane: "opus", risk: 2.2 },
+  { text: "Review this auth middleware for privilege-escalation bugs.", kind: "security", lane: "opus", risk: 2.6 },
+  { text: "Should we grant this IAM role s3:DeleteBucket? Explain the risk.", kind: "security", lane: "opus", risk: 2.8 },
+  { text: "Autonomously modernize the legacy checkout monolith into services over a multi-hour run, writing and verifying its own tests.", kind: "autonomous", lane: "fable", risk: 2.4 },
+  { text: "Do end-to-end research on our churn drivers across billing, product, and support data and deliver a finished exec brief.", kind: "research", lane: "fable", risk: 1.4 },
+  { text: "Write a punchy launch tweet for the new pricing page.", kind: "creative", lane: "haiku", risk: 0.4 },
+  { text: "Brainstorm 10 cold-open ideas for the demo video.", kind: "creative", lane: "sonnet", risk: 0.5 },
   { text: "Convert 41.9 USD to EUR at today's rate.", kind: "math", lane: "tool", risk: 0.3 },
   { text: "Deduplicate these 1,200 CRM rows by email.", kind: "data", lane: "tool", risk: 0.7 },
   { text: "Summarize this 30-page RFC into 5 bullets.", kind: "summarize", lane: "sonnet", risk: 0.9 },
@@ -204,17 +206,17 @@ const GAUNTLET_TASKS: LabeledTask[] = [
 
 const routerQuestions = {
   route: choice(
-    "Which model tier should handle this task? Pick the cheapest one that can do it well.",
+    "Route to the cheapest tier that will do it well, following Anthropic's own rule: default serious work to Opus, and only reach past it to Fable when the task genuinely exceeds Opus — deepest reasoning or long, multi-hour autonomous work. Ladder, weakest→strongest: tool < haiku < sonnet < opus < fable.",
     {
-      haiku: "Trivial or short: format, classify, extract, quick reply",
-      sonnet: "Moderate: normal coding, drafting, bounded multi-step work",
-      opus: "Hard reasoning, architecture, security-critical, or ambiguous",
-      fable: "Creative and long-form writing or ideation",
-      tool: "Deterministic — no LLM needed (regex, lookup, math, CRUD)",
+      tool: "Not an LLM at all — deterministic work: reformat, convert, dedupe, extract, regex, math, CRUD lookups",
+      haiku: "Fastest, cheapest tier. High-volume, latency-sensitive simple language: classify, triage, extract, short reply, translate, quick summary, short copy",
+      sonnet: "Balanced speed + intelligence. Everyday coding and tests, drafting and rewriting, data analysis, bounded agentic tool use",
+      opus: "The default for serious work: complex agentic coding, deep refactors, systems architecture, security review, tricky debugging, large migrations",
+      fable: "The frontier — the single most capable tier, above Opus. Reserve for what genuinely exceeds Opus: long-horizon multi-hour autonomous agent runs, deep end-to-end research delivered as a finished artifact, and root-causing problems Opus at max effort can't crack",
     },
   ),
-  needHuman: noul("Is this risky or ambiguous enough that a human should review before acting?"),
-  risk: score("Operational risk if this decision is wrong", ["low", "medium", "high", "critical"]),
+  needHuman: noul("Is this task too ambiguous or underspecified to act on safely without a human clarifying what's actually wanted? (Difficulty alone is NOT ambiguity — a hard-but-clear task is not ambiguous.)"),
+  risk: score("Operational blast radius if the output is wrong and used as-is", ["low", "medium", "high", "critical"]),
 };
 
 const gauntletQuestions = {
@@ -262,12 +264,17 @@ function softmaxNoise(keys: string[], winner: string, sharp: number): Record<str
 function genRouterTask(): RouterTask {
   const gens: (() => RouterTask)[] = [
     () => ({ text: `Add ${pick(["pagination", "rate limiting", "retries", "idempotency keys", "caching", "soft deletes"])} to the /${pick(["orders", "billing", "auth", "search", "webhooks", "exports"])} endpoint and write its tests.`, kind: "code", lane: "sonnet", risk: 1.2 }),
-    () => ({ text: `Review this ${pick(["auth middleware", "payment webhook", "file-upload handler", "JWT refresh flow", "admin API"])} for ${pick(["privilege-escalation", "SSRF", "injection", "IDOR", "replay"])} vulnerabilities.`, kind: "security", lane: "opus", risk: 3.0 }),
+    () => ({ text: `Review this ${pick(["auth middleware", "payment webhook", "file-upload handler", "JWT refresh flow", "admin API"])} for ${pick(["privilege-escalation", "SSRF", "injection", "IDOR", "replay"])} vulnerabilities.`, kind: "security", lane: "opus", risk: 2.6 }),
     () => ({ text: `Reformat this ${pick(["JSON blob", "CSV export", "YAML config", "log dump"])} and strip ${pick(["null fields", "duplicate keys", "trailing commas", "empty rows"])}.`, kind: "format", lane: "tool", risk: 0.2 }),
-    () => ({ text: `Write a ${pick(["punchy", "warm", "playful", "confident"])} ${pick(["launch tweet", "cold-open", "tagline", "headline"])} for ${pick(["the new pricing page", "our AI feature", "the beta signup", "the demo video"])}.`, kind: "creative", lane: "fable", risk: 0.5 }),
+    () => ({ text: `Write a ${pick(["punchy", "warm", "playful", "confident"])} ${pick(["launch tweet", "cold-open", "tagline", "headline"])} for ${pick(["the new pricing page", "our AI feature", "the beta signup", "the demo video"])}.`, kind: "creative", lane: "haiku", risk: 0.4 }),
     () => ({ text: `Is this ${pick(["spam", "billing", "sales"])} or ${pick(["a real customer", "technical", "support"])}? "${pick(["ur account is suspended, verify at bit.ly/x", "you won a $500 gift card, claim now", "I was double charged last month", "do you offer volume pricing?"])}"`, kind: "classify", lane: "haiku", risk: 0.6 }),
     () => ({ text: `Deduplicate these ${200 + Math.floor(Math.random() * 4000)} ${pick(["CRM rows", "user records", "invoices", "event logs"])} by ${pick(["email", "customer id", "timestamp", "order number"])}.`, kind: "data", lane: "tool", risk: 0.7 }),
-    () => ({ text: `Design the ${pick(["sharding strategy", "partitioning scheme", "archival policy", "replication topology"])} for the ${pick(["events table at 40TB", "sessions store at 5B rows", "media bucket at 2PB", "ledger at 900M rows"])}.`, kind: "architecture", lane: "opus", risk: 2.6 }),
+    () => ({ text: `Design the ${pick(["sharding strategy", "partitioning scheme", "archival policy", "replication topology"])} for the ${pick(["events table at 40TB", "sessions store at 5B rows", "media bucket at 2PB", "ledger at 900M rows"])}.`, kind: "architecture", lane: "opus", risk: 2.2 }),
+    () => ({ text: `Debug this intermittent ${pick(["race condition", "deadlock", "memory leak", "N+1 query storm", "cache stampede"])} in the ${pick(["payment worker", "sync job", "search indexer", "webhook processor", "session store"])} that only reproduces under production load.`, kind: "debug", lane: "opus", risk: 1.9 }),
+    () => ({ text: `Refactor the ${pick(["auth module", "billing engine", "checkout flow", "notification pipeline"])} to support ${pick(["multi-tenancy", "idempotent retries", "zero-downtime deploys", "horizontal scaling"])} across services without breaking callers.`, kind: "refactor", lane: "opus", risk: 2.1 }),
+    () => ({ text: `Autonomously ${pick(["migrate the auth service", "modernize the billing platform", "re-architect the search stack", "split the monolith"])} across ${pick(["40", "60", "120"])} microservices end-to-end — plan it, land it in stages, and write and run its own tests at each step over a multi-hour session.`, kind: "autonomous", lane: "fable", risk: 2.4 }),
+    () => ({ text: `Run end-to-end deep research on ${pick(["our top 5 competitors' pricing", "EU vs US data-residency obligations", "the trade-offs across 6 vector databases", "our churn drivers across billing, product, and support"])} and deliver a finished, cited decision brief.`, kind: "research", lane: "fable", risk: 1.4 }),
+    () => ({ text: `Root-cause this ${pick(["heisenbug", "silent data-corruption", "intermittent 3am outage", "cross-service deadlock"])} that our senior engineers and our strongest model already failed to reproduce.`, kind: "rootcause", lane: "fable", risk: 2.0 }),
     () => ({ text: `Customer ${pick(["was double charged", "can't reset their password", "sees a 500 on upload", "wants to cancel", "got the wrong plan"])} — which team owns this and what's the next step?`, kind: "support", lane: "haiku", risk: 1.1 }),
     () => ({ text: `Summarize this ${pick(["30-page RFC", "batch of 14 merged PRs", "incident timeline", "quarterly report"])} into 5 bullets.`, kind: "summarize", lane: "sonnet", risk: 0.8 }),
     () => ({ text: `Convert ${(Math.random() * 100).toFixed(2)} USD to ${pick(["EUR", "GBP", "JPY", "CAD"])} at today's rate.`, kind: "math", lane: "tool", risk: 0.3 }),
@@ -279,10 +286,15 @@ function genRouterTask(): RouterTask {
 /** For a user-typed task we have no ground truth, so infer a plausible SIM lane/risk. */
 function guessLane(text: string): string {
   const t = text.toLowerCase();
-  if (/security|vuln|exploit|auth|escalat|inject|ssrf|idor|password|token|secret|architect|design|scal|shard|migrat|strategy|roll ?out|permission/.test(t)) return "opus";
-  if (/code|implement|endpoint|test|refactor|bug|fix|api|function|summar|draft|rewrite|translate|review/.test(t)) return "sonnet";
+  // Frontier — genuinely beyond Opus: long-horizon autonomous runs, deep end-to-end research to a
+  // finished artifact, or root-causing what a strong model already couldn't crack.
+  if (/autonomous|multi-?hour|long-?horizon|overnight|over the weekend|end-to-end research|deep research|root.?cause.*(couldn|could not|fail|nobody|no one)|even opus|beyond opus|self-verif|days? of work/.test(t)) return "fable";
+  // The Opus default for serious engineering: security review, architecture, debugging, refactors, migrations.
+  if (/security|vuln|exploit|privileg|escalat|inject|ssrf|idor|architect|design|shard|partition|replication|topology|debug|race condition|deadlock|memory leak|refactor|migrat|distributed|concurren|multi-?tenant|roll ?out|permission|scal/.test(t)) return "opus";
+  // Standard engineering & writing → sonnet.
+  if (/code|implement|endpoint|test|bug|fix|api|function|summar|draft|rewrite|translate|review|brainstorm|ideat|analy/.test(t)) return "sonnet";
+  // Deterministic → tool.
   if (/format|convert|dedup|extract|regex|parse|csv|json|math|calcul|lookup/.test(t)) return "tool";
-  if (/tweet|creative|brainstorm|slogan|tagline|story|poem|headline|copy/.test(t)) return "fable";
   return "haiku";
 }
 function guessRisk(text: string): number {
@@ -297,14 +309,28 @@ function makeCustomTask(text: string): RouterTask {
 }
 
 /**
- * Escalate to REVIEW only when it's genuinely warranted: a human flag, high risk, or Jev is
- * torn between tiers (the top lane barely leads the runner-up). Raw confidence < 0.5 was too
- * aggressive — probability is naturally diluted across 5 lanes, so a clear pick can read < 0.5.
+ * Escalate to REVIEW on genuine uncertainty — NOT on task difficulty. A hard, high-stakes task
+ * that Jev confidently types (e.g. a security review) is exactly what the `opus` lane is for;
+ * routing it there is the right call, not a punt. Blanket `risk >= 2.8` made opus unreachable —
+ * every task hard enough for opus tripped the risk wire straight to REVIEW. So REVIEW now fires
+ * only when Jev genuinely can't route safely:
+ *   - it flags the task as too ambiguous to act on (regardless of stakes — ambiguity means we
+ *     literally don't know what's wanted), or
+ *   - it's torn between tiers AND the stakes justify a human. A close tool-vs-haiku call on a
+ *     reformat is a coin-flip that costs nothing to get wrong — just take the top lane; don't
+ *     burn a human on it. Only escalate a torn decision when the blast radius is real AND a human
+ *     could actually add value. When the contest is between the two frontier tiers (opus vs fable),
+ *     a human adds nothing — either pick is an excellent model — so we take the stronger, not REVIEW.
  */
+const FRONTIER_TIERS = new Set(["opus", "fable"]);
 function routeEscalated(laneProbs: Record<string, number>, confidence: number, needHuman: number, risk: number): boolean {
-  const sorted = Object.values(laneProbs).sort((a, b) => b - a);
-  const margin = (sorted[0] ?? confidence) - (sorted[1] ?? 0);
-  return needHuman > 0.7 || risk >= 2.8 || margin < 0.1;
+  const ranked = Object.entries(laneProbs).sort((a, b) => b[1] - a[1]);
+  const top = ranked[0];
+  const second = ranked[1];
+  const margin = (top ? top[1] : confidence) - (second ? second[1] : 0);
+  const bothFrontier = !!top && !!second && FRONTIER_TIERS.has(top[0]) && FRONTIER_TIERS.has(second[0]);
+  const tornOnStakes = margin < 0.15 && risk >= 1.8 && !bothFrontier;
+  return needHuman > 0.8 || tornOnStakes;
 }
 
 async function routerDecide(task: RouterTask, id: number): Promise<RouterDecision> {
@@ -327,7 +353,10 @@ async function routerDecide(task: RouterTask, id: number): Promise<RouterDecisio
   // sim
   const laneProbs = softmaxNoise(Object.keys(routerQuestions.route.criteria), task.lane, 2.2 + Math.random());
   const confidence = laneProbs[task.lane]!;
-  const needHuman = Math.min(1, Math.max(0, task.risk / 4 + (Math.random() - 0.5) * 0.25));
+  // needHuman now means "too ambiguous to act on" — a property of the *task*, not its risk. Only the
+  // genuinely under-specified kinds (spam-or-real triage, vague support asks, free-typed) lean high.
+  const ambiguous = /classify|moderation|support|custom/.test(task.kind);
+  const needHuman = Math.min(1, Math.max(0, (ambiguous ? 0.72 : 0.15) + (Math.random() - 0.5) * 0.45));
   const risk = Math.max(0, Math.min(3, task.risk + (Math.random() - 0.5) * 0.5));
   return {
     id, task: task.text, kind: task.kind,

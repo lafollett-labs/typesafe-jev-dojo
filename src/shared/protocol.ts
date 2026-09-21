@@ -145,8 +145,8 @@ export type ServerMsg =
   | { type: "reload" }
   | { type: "error"; message: string };
 
-/** Router lane targets (models + non-LLM destinations). */
-export const ROUTER_LANES = ["haiku", "sonnet", "opus", "fable", "tool"] as const;
+/** Router lane targets, frontier→deterministic (Fable is the most capable tier, tool is no-LLM). */
+export const ROUTER_LANES = ["fable", "opus", "sonnet", "haiku", "tool"] as const;
 export type RouterLane = (typeof ROUTER_LANES)[number];
 
 /** Swarm actions an agent can pick. */

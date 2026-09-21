@@ -148,7 +148,8 @@ class RouterScene implements Scene {
     this.coreR = clamp(Math.min(W, H) * 0.06, 34, 52);
     const keys = [...ROUTER_LANES, "review"];
     const x = W * (W < 620 ? 0.9 : 0.84);
-    const top = H * 0.15, bot = H * 0.8;
+    // Keep the lowest lane (REVIEW) clear of the bottom-right help note, which can wrap tall.
+    const top = H * 0.14, bot = H * 0.72;
     keys.forEach((k, i) => {
       const y = lerp(top, bot, i / (keys.length - 1));
       this.ends[k] = { x, y, hit: this.ends[k]?.hit ?? 0 };
@@ -229,7 +230,7 @@ class RouterScene implements Scene {
     } as CSSStyleDeclaration);
     this.feed.innerHTML = `<div style="font-family:var(--display);font-size:11px;letter-spacing:.08em;color:#878ca6;text-transform:uppercase;margin-bottom:2px">Decision feed</div>`;
     document.querySelector("main")!.appendChild(this.feed);
-    note.textContent = "Start streams an endless feed of self-generating tasks — or type your own and Route it live (works even while paused). Jev answers 3 questions per task: model tier · needs-human? · risk. Low confidence / high risk escalates to REVIEW.";
+    note.textContent = "Endless self-generating tasks — or type your own and Route it live. Jev answers 3 typed questions each: tier (tool→haiku→sonnet→opus→fable) · too-ambiguous? · risk. Hard work routes UP the ladder; only real uncertainty escalates to REVIEW.";
   }
   exit() {
     this.running = false;
