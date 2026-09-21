@@ -106,6 +106,8 @@ export type ClientMsg =
   | { type: "scene"; scene: SceneId }
   | { type: "router.run"; on: boolean }
   | { type: "router.rate"; perSec: number }
+  | { type: "router.task"; text: string }
+  | { type: "router.reset" }
   | { type: "swarm.broadcast"; event: string; count: number }
   | { type: "gauntlet.start"; count: number }
   | { type: "reflex.run"; on: boolean }

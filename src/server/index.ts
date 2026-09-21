@@ -190,6 +190,46 @@ function softmaxNoise(keys: string[], winner: string, sharp: number): Record<str
 
 // --- live callers -----------------------------------------------------------
 
+// --- Router real-time task stream (self-generating + user-injected) ---------
+
+/** Procedurally compose a realistic routing task — endless, varied "live" data. */
+function genRouterTask(): RouterTask {
+  const gens: (() => RouterTask)[] = [
+    () => ({ text: `Add ${pick(["pagination", "rate limiting", "retries", "idempotency keys", "caching", "soft deletes"])} to the /${pick(["orders", "billing", "auth", "search", "webhooks", "exports"])} endpoint and write its tests.`, kind: "code", lane: "sonnet", risk: 1.2 }),
+    () => ({ text: `Review this ${pick(["auth middleware", "payment webhook", "file-upload handler", "JWT refresh flow", "admin API"])} for ${pick(["privilege-escalation", "SSRF", "injection", "IDOR", "replay"])} vulnerabilities.`, kind: "security", lane: "opus", risk: 3.0 }),
+    () => ({ text: `Reformat this ${pick(["JSON blob", "CSV export", "YAML config", "log dump"])} and strip ${pick(["null fields", "duplicate keys", "trailing commas", "empty rows"])}.`, kind: "format", lane: "tool", risk: 0.2 }),
+    () => ({ text: `Write a ${pick(["punchy", "warm", "playful", "confident"])} ${pick(["launch tweet", "cold-open", "tagline", "headline"])} for ${pick(["the new pricing page", "our AI feature", "the beta signup", "the demo video"])}.`, kind: "creative", lane: "fable", risk: 0.5 }),
+    () => ({ text: `Is this ${pick(["spam", "billing", "sales"])} or ${pick(["a real customer", "technical", "support"])}? "${pick(["ur account is suspended, verify at bit.ly/x", "you won a $500 gift card, claim now", "I was double charged last month", "do you offer volume pricing?"])}"`, kind: "classify", lane: "haiku", risk: 0.6 }),
+    () => ({ text: `Deduplicate these ${200 + Math.floor(Math.random() * 4000)} ${pick(["CRM rows", "user records", "invoices", "event logs"])} by ${pick(["email", "customer id", "timestamp", "order number"])}.`, kind: "data", lane: "tool", risk: 0.7 }),
+    () => ({ text: `Design the ${pick(["sharding strategy", "partitioning scheme", "archival policy", "replication topology"])} for the ${pick(["events table at 40TB", "sessions store at 5B rows", "media bucket at 2PB", "ledger at 900M rows"])}.`, kind: "architecture", lane: "opus", risk: 2.6 }),
+    () => ({ text: `Customer ${pick(["was double charged", "can't reset their password", "sees a 500 on upload", "wants to cancel", "got the wrong plan"])} — which team owns this and what's the next step?`, kind: "support", lane: "haiku", risk: 1.1 }),
+    () => ({ text: `Summarize this ${pick(["30-page RFC", "batch of 14 merged PRs", "incident timeline", "quarterly report"])} into 5 bullets.`, kind: "summarize", lane: "sonnet", risk: 0.8 }),
+    () => ({ text: `Convert ${(Math.random() * 100).toFixed(2)} USD to ${pick(["EUR", "GBP", "JPY", "CAD"])} at today's rate.`, kind: "math", lane: "tool", risk: 0.3 }),
+    () => pick(ROUTER_TASKS), // mix in the curated corpus
+  ];
+  return pick(gens)();
+}
+
+/** For a user-typed task we have no ground truth, so infer a plausible SIM lane/risk. */
+function guessLane(text: string): string {
+  const t = text.toLowerCase();
+  if (/security|vuln|exploit|auth|escalat|inject|ssrf|idor|password|token|secret|architect|design|scal|shard|migrat|strategy|roll ?out|permission/.test(t)) return "opus";
+  if (/code|implement|endpoint|test|refactor|bug|fix|api|function|summar|draft|rewrite|translate|review/.test(t)) return "sonnet";
+  if (/format|convert|dedup|extract|regex|parse|csv|json|math|calcul|lookup/.test(t)) return "tool";
+  if (/tweet|creative|brainstorm|slogan|tagline|story|poem|headline|copy/.test(t)) return "fable";
+  return "haiku";
+}
+function guessRisk(text: string): number {
+  const t = text.toLowerCase();
+  if (/security|vuln|exploit|delete|drop|prod|migrat|irrevers|payment|charge|escalat/.test(t)) return 2.9;
+  if (/architect|design|scal|plan|permission|access|deploy/.test(t)) return 2.2;
+  if (/code|refactor|bug|fix|endpoint/.test(t)) return 1.2;
+  return 0.5;
+}
+function makeCustomTask(text: string): RouterTask {
+  return { text: text.slice(0, 400), kind: "custom", lane: guessLane(text), risk: guessRisk(text) };
+}
+
 async function routerDecide(task: RouterTask, id: number): Promise<RouterDecision> {
   if (jev) {
     const t0 = performance.now();
@@ -388,6 +428,7 @@ class Session {
   private abort = new AbortController();
   private routerRunning = false;
   private routerPerSec = 3;
+  private routerId = 0;
   private stackerRunning = false;
   private stackerPerSec = 3;
   private stacker: StackerState = newStackerState();
@@ -423,6 +464,8 @@ class Session {
         break;
       case "router.run": this.routerRunning = msg.on; break;
       case "router.rate": this.routerPerSec = Math.max(1, Math.min(10, msg.perSec)); break;
+      case "router.task": if (msg.text?.trim()) this.routeOne(msg.text.trim()); break;
+      case "router.reset": this.startRouter(); break;
       case "reflex.run":
         // pressing Start after a top-out begins a fresh game
         if (msg.on && this.stackerOver) { this.stacker = newStackerState(); this.stackerOver = false; }
@@ -438,28 +481,36 @@ class Session {
   private async startRouter() {
     const signal = this.reset();
     this.routerRunning = false; // ALWAYS start paused — no calls until the user presses Start
-    let id = 0;
+    this.routerId = 0;
     while (!signal.aborted) {
       if (!this.routerRunning) {
         await sleep(100, signal); // idle: no decisions, no calls
         continue;
       }
-      const task = ROUTER_TASKS[id % ROUTER_TASKS.length]!;
-      try {
-        const d = await routerDecide(task, id++);
-        if (signal.aborted) return;
-        this.send({ type: "router.decision", d });
-        this.tx({
-          scene: "router", transport: TRANSPORT, model: JEV_MODEL, kind: d.kind, input: d.task,
-          summary: `→ ${d.escalated ? "REVIEW" : d.lane.toUpperCase()} · conf ${Math.round(d.confidence * 100)}% · risk ${d.risk.toFixed(1)} · human ${d.needHuman.toFixed(2)}`,
-          inputTokens: d.inputTokens, costUsd: d.costUsd, latencyMs: d.latencyMs, live: MODE === "live",
-        });
-      } catch (e) {
-        this.send({ type: "error", message: (e as Error).message });
-        await sleep(500, signal);
-      }
+      await this.routeTask(genRouterTask(), signal); // endless self-generated stream
       await sleep(Math.max(80, Math.round(1000 / this.routerPerSec)), signal);
     }
+  }
+
+  /** Route ONE task now and stream the decision — used by the auto-stream and by injection. */
+  private async routeTask(task: RouterTask, signal: AbortSignal) {
+    try {
+      const d = await routerDecide(task, this.routerId++);
+      if (signal.aborted) return;
+      this.send({ type: "router.decision", d });
+      this.tx({
+        scene: "router", transport: TRANSPORT, model: JEV_MODEL, kind: d.kind, input: d.task,
+        summary: `→ ${d.escalated ? "REVIEW" : d.lane.toUpperCase()} · conf ${Math.round(d.confidence * 100)}% · risk ${d.risk.toFixed(1)} · human ${d.needHuman.toFixed(2)}`,
+        inputTokens: d.inputTokens, costUsd: d.costUsd, latencyMs: d.latencyMs, live: MODE === "live",
+      });
+    } catch (e) {
+      this.send({ type: "error", message: (e as Error).message });
+    }
+  }
+
+  /** User-injected task — routed immediately, even while the auto-stream is paused. */
+  private routeOne(text: string) {
+    void this.routeTask(makeCustomTask(text), this.abort.signal);
   }
 
   private async startStacker() {

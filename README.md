@@ -34,7 +34,7 @@ the keys and makes every decision call; the browser is a pure renderer.
 
 | Scene | What it shows |
 | - | - |
-| **Router** | Tasks stream in; Jev answers **3 typed questions** each — *which model tier* (choice) · *needs a human?* (noul) · *operational risk* (score) — and routes each task down a neon lane. Low confidence / high risk / needs-human **escalates to REVIEW** instead of guessing. Live throughput, latency, $-saved-vs-Opus, and a decision feed. **Starts paused.** |
+| **Router** | An **endless, self-generating stream** of realistic tasks (or **type your own** and route it live, even while paused). Jev answers **3 typed questions** each — *which model tier* (choice) · *needs a human?* (noul) · *operational risk* (score) — and routes each down a neon lane. Low confidence / high risk / needs-human **escalates to REVIEW** instead of guessing. Live throughput, latency, $-saved-vs-Opus, and a decision feed. **Start / Pause / Reset.** |
 | **Stacker** | **Jev plays Tetris.** Every piece is **one typed `choice`** over *every* legal placement (column × rotation), each option described by the board it produces — `clears N · +H holes · top M · bump B`. No look-ahead search — just a fast typed decision per piece. Real line clears; on top-out it stops and waits for Start. In SIM the pick uses a genetic-algorithm-tuned heuristic. **Starts paused.** |
 | **Swarm** | Broadcast one event; Jev fires **N decisions in parallel**; hundreds of agents react, colored by their choice and haloed by confidence. |
 | **Gauntlet** | The honest scene: the same labeled tasks → **Jev vs. Claude**, scored against ground truth. Green/red per task, plus accuracy / latency / cost bars — the numbers the demos skip. |
@@ -43,7 +43,8 @@ the keys and makes every decision call; the browser is a pure renderer.
 
 - Every scene that makes repeated calls (**Router**, **Stacker**) **opens paused** behind a
   **Start / Pause** button and a speed slider — nothing is billed until you press Start.
-  Stacker also has a **Reset** to wipe the board and stats and start a fresh game.
+  Both have a **Reset** (wipe stats / board and start fresh); Router also lets you **type any
+  task and route it live** on demand.
 - **Swarm** and **Gauntlet** run only on their button press.
 - The **Ledger** (top-right counter) opens a live, scrollable log of every billed call —
   input, verdict, tokens, latency, cost — and is also appended to `logs/transactions.jsonl`.

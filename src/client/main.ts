@@ -165,15 +165,28 @@ class RouterScene implements Scene {
       { k: "spent", v: "$0.00" },
       { k: "saved vs opus", v: "$0.00", color: C.green },
     ]);
-    // controls: Start/Pause + speed
+    // controls: Start/Pause + Reset + speed
     const panel = document.createElement("div");
     panel.className = "panel controls";
     panel.innerHTML = `
       <button class="btn" id="rt-toggle">▶ Start</button>
+      <button class="btn ghost" id="rt-reset">⟲ Reset</button>
       <label>speed <span id="rt-rn">3</span>/s</label>
       <input type="range" id="rt-rate" min="1" max="8" step="1" value="3" />
       <span class="chip" id="rt-status">paused · idle</span>`;
-    dock.appendChild(panel);
+    // stack the two control rows in a left column so they never collide with the note (right)
+    const col = document.createElement("div");
+    col.style.cssText = "display:flex;flex-direction:column;gap:10px;max-width:70vw;";
+    col.appendChild(panel);
+    // manual injection: type any task and route it live (works even while paused)
+    const inject = document.createElement("div");
+    inject.className = "panel controls";
+    inject.innerHTML = `
+      <label>route your own</label>
+      <input type="text" id="rt-task" placeholder="e.g. Review this auth middleware for IDOR bugs" style="min-width:260px" />
+      <button class="btn" id="rt-send">Route ▸</button>`;
+    col.appendChild(inject);
+    dock.appendChild(col);
     const toggle = $("#rt-toggle") as HTMLButtonElement;
     toggle.onclick = () => {
       this.running = !this.running;
@@ -182,6 +195,25 @@ class RouterScene implements Scene {
       toggle.classList.toggle("ghost", this.running);
       ($("#rt-status")).textContent = this.running ? "running — live calls" : "paused · idle";
     };
+    ($("#rt-reset") as HTMLButtonElement).onclick = () => {
+      this.running = false;
+      send({ type: "router.reset" });
+      this.packets = []; this.total = 0; this.lat = []; this.cost = 0; this.saved = 0; this.stamps = [];
+      for (const k of Object.keys(this.perLane)) this.perLane[k] = 0;
+      if (this.feed) while (this.feed.children.length > 1) this.feed.lastElementChild!.remove();
+      toggle.textContent = "▶ Start"; toggle.classList.remove("ghost");
+      ($("#rt-status")).textContent = "reset · idle";
+      setTile(0, "0"); setTile(1, "0"); setTile(2, "—"); setTile(3, "$0.00"); setTile(4, "$0.00");
+    };
+    const routeInput = $("#rt-task") as HTMLInputElement;
+    const sendTask = () => {
+      const text = routeInput.value.trim();
+      if (!text) return;
+      send({ type: "router.task", text });
+      routeInput.value = "";
+    };
+    ($("#rt-send") as HTMLButtonElement).onclick = sendTask;
+    routeInput.onkeydown = (e) => { if (e.key === "Enter") sendTask(); };
     ($("#rt-rate") as HTMLInputElement).oninput = (e) => {
       const v = Number((e.target as HTMLInputElement).value);
       $("#rt-rn").textContent = String(v);
@@ -197,7 +229,7 @@ class RouterScene implements Scene {
     } as CSSStyleDeclaration);
     this.feed.innerHTML = `<div style="font-family:var(--display);font-size:11px;letter-spacing:.08em;color:#878ca6;text-transform:uppercase;margin-bottom:2px">Decision feed</div>`;
     document.querySelector("main")!.appendChild(this.feed);
-    note.textContent = "Press Start to route (paused by default — no calls until you do). Jev answers 3 questions per task: model · needs-human? · risk. Low confidence escalates to REVIEW.";
+    note.textContent = "Start streams an endless feed of self-generating tasks — or type your own and Route it live (works even while paused). Jev answers 3 questions per task: model tier · needs-human? · risk. Low confidence / high risk escalates to REVIEW.";
   }
   exit() {
     this.running = false;
