@@ -616,7 +616,7 @@ function simTriage(ticket: string): Record<string, Record<string, unknown>> {
   const spam = /bit\.ly|gift card|reward|verify your|claim now|congratulations|selected|suspend/.test(t);
   const feedback = /gorgeous|love the|loving|deserve|keep it up|no rush|roadmap|dark mode|typo|montly|feature request|wondering if/.test(t);
   const technical = /error|bug|spins|invalid|throw|\bfail|\b503\b|\b500\b|export|sdk|token|refresh|\bdown\b|outage|\bapi\b/.test(t);
-  const billing = /charg|refund|invoice|\bbill|payment|credit|cancel|subscription/.test(t);
+  const billing = /charg|refund|invoice|payment|credit|double|twice|overcharg|cancel|subscription/.test(t); // transactional only, so "annual billing" (a sales phrase) doesn't match
   const sales = /demo|quote|evaluat|annual|tier|\bsso\b|volume|business|seats|pricing|\bplan\b/.test(t);
   const account = /password|reset|login|locked|mot de passe/.test(t);
   const intentKey = spam ? "spam" : feedback ? "feedback" : technical ? "technical" : billing ? "billing" : sales ? "sales" : account ? "account" : "technical";
@@ -731,14 +731,19 @@ class Session {
     this.send({ type: "triage.queue.start", count: n });
     const t0 = performance.now();
     const totals = { tokens: 0, cost: 0 };
-    await mapLimit(chosen, MODE === "live" ? 12 : 24, async (item) => {
-      if (MODE === "sim") await sleep(120 + Math.random() * 480, signal); // stagger the stream so SIM looks live
-      const r = await triageDecide(item.ticket);
-      if (signal.aborted) return;
-      totals.tokens += r.inputTokens; totals.cost += r.costUsd;
-      this.send({ type: "triage.item", id: item.id, r });
-    }, signal);
+    try {
+      await mapLimit(chosen, MODE === "live" ? 12 : 24, async (item) => {
+        if (MODE === "sim") await sleep(120 + Math.random() * 480, signal); // stagger the stream so SIM looks live
+        const r = await triageDecide(item.ticket);
+        if (signal.aborted) return;
+        totals.tokens += r.inputTokens; totals.cost += r.costUsd;
+        this.send({ type: "triage.item", id: item.id, r });
+      }, signal);
+    } catch (e) {
+      if (!signal.aborted) this.send({ type: "error", message: (e as Error).message });
+    }
     if (signal.aborted) return;
+    // still emit `done` (with whatever landed) so the client never sticks on "fanning out…"
     const wallMs = performance.now() - t0;
     this.send({ type: "triage.queue.done", count: n, inputTokens: totals.tokens, costUsd: totals.cost, wallMs, live: MODE === "live" });
     this.tx({
@@ -986,6 +991,10 @@ new WebSocketServer({ server }).on("connection", (ws) => {
   ws.on("close", () => clients.delete(ws));
   new Session(ws);
 });
+
+// Safety net: a stray rejection from any scene's fire-and-forget loop shouldn't take
+// down the long-running demo server — log it and keep serving other clients.
+process.on("unhandledRejection", (reason) => console.error("[unhandledRejection]", reason));
 
 server.listen(PORT, () => {
   console.log(`\n  🥋 Jev Dojo demo — ${HEALTH.note}`);
