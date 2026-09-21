@@ -802,6 +802,7 @@ class TriageScene implements Scene {
 
   resize() {}
   enter() {
+    this.r = null; this.running = false; this.shownAt = 0; // fresh on every (re)entry
     tiles([
       { k: "decisions", v: "0" },
       { k: "requests", v: "1", color: C.jev },
@@ -869,26 +870,39 @@ class TriageScene implements Scene {
       return;
     }
     const r = this.r;
-    const LW = clamp(W * 0.36, 260, 430);
-    const tx = 24, ty = 70;
-    const all = wrapLines(r.ticket, LW - 28, M(12.5));
-    const lines = all.length > 7 ? [...all.slice(0, 7), "…"] : all;
-    const theight = 30 + lines.length * 18 + 12;
-    ctx.fillStyle = C.panel; rr(tx, ty, LW, theight, 12); ctx.fill();
-    ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1; rr(tx, ty, LW, theight, 12); ctx.stroke();
-    text("TICKET", tx + 14, ty + 16, M(9.5), C.muted);
-    lines.forEach((ln, i) => text(ln, tx + 14, ty + 34 + i * 18, M(12.5), C.text));
-    let my = ty + theight + 28;
-    glow(C.jev, 8, () => text(`${r.count} typed decisions`, tx, my, D(22), "#fff"));
-    my += 26; text(`1 request · ${Math.round(r.latencyMs)}ms · $${r.costUsd.toFixed(6)}`, tx, my, M(12.5), C.cyan);
-    my += 20; text(`one-by-one: ${r.count} requests · ${fmtTok(r.seqInputTokens)} tok · $${r.seqCostUsd.toFixed(6)}`, tx, my, M(11), C.muted);
-    my += 18; text(`→ batched sends the ticket once — ${(r.seqInputTokens / Math.max(1, r.inputTokens)).toFixed(1)}× fewer tokens`, tx, my, M(11), C.green);
-    const gx = tx + LW + 40, gw = W - gx - 24;
-    const cols = Math.max(1, Math.floor(gw / 175)), gap = 12;
-    const cardW = (gw - gap * (cols - 1)) / cols, cardH = 62;
+    const mult = (r.seqInputTokens / Math.max(1, r.inputTokens)).toFixed(1);
+    const narrow = W < 780;
+    let gx: number, gw: number, gy: number;
+    if (narrow) {
+      // Stacked: compact ticket + metrics across the top, cards full-width below.
+      const lines = wrapLines(r.ticket, W - 48, M(11.5)).slice(0, 2);
+      lines.forEach((ln, i) => text(ln, 24, 64 + i * 16, M(11.5), C.muted));
+      glow(C.jev, 6, () => text(`${r.count} typed decisions · 1 request · ${Math.round(r.latencyMs)}ms · $${r.costUsd.toFixed(6)}`, 24, 108, D(14), "#fff"));
+      text(`vs one-by-one: ${fmtTok(r.seqInputTokens)} tok · $${r.seqCostUsd.toFixed(6)} · ${mult}× more`, 24, 128, M(10.5), C.green);
+      gx = 24; gw = W - 48; gy = 148;
+    } else {
+      const LW = clamp(W * 0.36, 260, 430);
+      const tx = 24, ty = 70;
+      const all = wrapLines(r.ticket, LW - 28, M(12.5));
+      const lines = all.length > 7 ? [...all.slice(0, 7), "…"] : all;
+      const theight = 30 + lines.length * 18 + 12;
+      ctx.fillStyle = C.panel; rr(tx, ty, LW, theight, 12); ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1; rr(tx, ty, LW, theight, 12); ctx.stroke();
+      text("TICKET", tx + 14, ty + 16, M(9.5), C.muted);
+      lines.forEach((ln, i) => text(ln, tx + 14, ty + 34 + i * 18, M(12.5), C.text));
+      let my = ty + theight + 28;
+      glow(C.jev, 8, () => text(`${r.count} typed decisions`, tx, my, D(22), "#fff"));
+      my += 26; text(`1 request · ${Math.round(r.latencyMs)}ms · $${r.costUsd.toFixed(6)}`, tx, my, M(12.5), C.cyan);
+      my += 20; text(`one-by-one: ${r.count} requests · ${fmtTok(r.seqInputTokens)} tok · $${r.seqCostUsd.toFixed(6)}`, tx, my, M(11), C.muted);
+      my += 18; text(`→ batched sends the ticket once — ${mult}× fewer tokens`, tx, my, M(11), C.green);
+      gx = tx + LW + 40; gw = W - gx - 24; gy = 74;
+    }
+    const gap = 12, cardH = 62;
+    const cols = Math.max(2, Math.floor(gw / 168));
+    const cardW = (gw - gap * (cols - 1)) / cols;
     r.fields.forEach((f, i) => {
       const cx = gx + (i % cols) * (cardW + gap);
-      const cy = 74 + Math.floor(i / cols) * (cardH + gap);
+      const cy = gy + Math.floor(i / cols) * (cardH + gap);
       this.card(f, cx, cy, cardW, cardH, (now - this.shownAt) / 1000 / 0.28 - i * 0.04);
     });
   }
