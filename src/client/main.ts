@@ -259,7 +259,7 @@ class RouterScene implements Scene {
     } as CSSStyleDeclaration);
     this.feed.innerHTML = `<div style="font-family:var(--display);font-size:11px;letter-spacing:.08em;color:#878ca6;text-transform:uppercase;margin-bottom:2px">Decision feed</div>`;
     document.querySelector("main")!.appendChild(this.feed);
-    note.textContent = "Endless self-generating tasks — or type your own and Route it live. Jev answers 3 typed questions each: tier (tool→haiku→sonnet→opus→fable) · too-ambiguous? · risk. Hard work routes UP the ladder; only real uncertainty escalates to REVIEW.";
+    note.textContent = "Endless self-generating tasks — or type your own and Route it live. Jev answers 3 typed questions each: tier (tool→haiku→sonnet→opus→fable) · human-oversight? · risk. Hard, high-stakes work routes UP to a capable tier — an automated router has no human to punt to. REVIEW is a rare abstain: Jev genuinely can't tell which tier the task needs. Risk + oversight are advisory tags, not gates.";
   }
   exit() {
     this.running = false;

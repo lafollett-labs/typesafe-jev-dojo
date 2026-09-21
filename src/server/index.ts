@@ -315,12 +315,23 @@ function genRouterTask(): RouterTask {
     () => ({ text: `Design the ${pick(["sharding strategy", "partitioning scheme", "archival policy", "replication topology"])} for the ${pick(["events table at 40TB", "sessions store at 5B rows", "media bucket at 2PB", "ledger at 900M rows"])}.`, kind: "architecture", lane: "opus", risk: 2.2 }),
     () => ({ text: `Debug this intermittent ${pick(["race condition", "deadlock", "memory leak", "N+1 query storm", "cache stampede"])} in the ${pick(["payment worker", "sync job", "search indexer", "webhook processor", "session store"])} that only reproduces under production load.`, kind: "debug", lane: "opus", risk: 1.9 }),
     () => ({ text: `Refactor the ${pick(["auth module", "billing engine", "checkout flow", "notification pipeline"])} to support ${pick(["multi-tenancy", "idempotent retries", "zero-downtime deploys", "horizontal scaling"])} across services without breaking callers.`, kind: "refactor", lane: "opus", risk: 2.1 }),
-    () => ({ text: `Autonomously ${pick(["migrate the auth service", "modernize the billing platform", "re-architect the search stack", "split the monolith"])} across ${pick(["40", "60", "120"])} microservices end-to-end — plan it, land it in stages, and write and run its own tests at each step over a multi-hour session.`, kind: "autonomous", lane: "fable", risk: 2.4 }),
-    () => ({ text: `Run end-to-end deep research on ${pick(["our top 5 competitors' pricing", "EU vs US data-residency obligations", "the trade-offs across 6 vector databases", "our churn drivers across billing, product, and support"])} and deliver a finished, cited decision brief.`, kind: "research", lane: "fable", risk: 1.4 }),
-    () => ({ text: `Root-cause this ${pick(["heisenbug", "silent data-corruption", "intermittent 3am outage", "cross-service deadlock"])} that our senior engineers and our strongest model already failed to reproduce.`, kind: "rootcause", lane: "fable", risk: 2.0 }),
+    // Fable is the RARE frontier — kept to two generators so it stays scarce (the rarest LLM tier), not a third of traffic.
+    () => ({ text: `Autonomously ${pick(["migrate the auth service", "re-architect the search stack", "split the monolith"])} across ${pick(["40", "80", "120"])} microservices end-to-end over a multi-hour run, writing and verifying its own tests at each step.`, kind: "autonomous", lane: "fable", risk: 2.4 }),
+    () => ({ text: pick([
+      `Run end-to-end deep research on ${pick(["our competitors' pricing", "EU vs US data-residency obligations", "the trade-offs across 6 vector databases", "our churn drivers"])} and deliver a finished, cited decision brief.`,
+      `Root-cause this ${pick(["heisenbug", "silent data-corruption", "intermittent 3am outage"])} that our senior engineers and our strongest model already failed to reproduce.`,
+    ]), kind: "frontier", lane: "fable", risk: 2.0 }),
     () => ({ text: `Customer ${pick(["was double charged", "can't reset their password", "sees a 500 on upload", "wants to cancel", "got the wrong plan"])} — which team owns this and what's the next step?`, kind: "support", lane: "haiku", risk: 1.1 }),
     () => ({ text: `Summarize this ${pick(["30-page RFC", "batch of 14 merged PRs", "incident timeline", "quarterly report"])} into 5 bullets.`, kind: "summarize", lane: "sonnet", risk: 0.8 }),
+    // Sonnet is the everyday workhorse — the bulk of real traffic is standard coding, writing, and analysis.
+    () => ({ text: `Write ${pick(["unit tests", "integration tests", "API docs", "a data migration", "input validation"])} for the ${pick(["checkout", "orders", "billing", "search", "notifications"])} module.`, kind: "code", lane: "sonnet", risk: 0.9 }),
+    () => ({ text: `Draft ${pick(["release notes", "a changelog", "the onboarding email", "an internal runbook", "the FAQ"])} from ${pick(["these 14 merged PRs", "this spec", "the incident timeline", "the support backlog"])}.`, kind: "draft", lane: "sonnet", risk: 0.6 }),
+    () => ({ text: `Analyze ${pick(["this signups dataset", "last month's metrics", "the conversion funnel", "these 500 support tickets"])} and summarize the top 3 trends with a chart.`, kind: "analysis", lane: "sonnet", risk: 0.7 }),
+    () => ({ text: `Rewrite this ${pick(["support macro", "error message", "README section", "onboarding step", "API changelog"])} to be clearer and warmer.`, kind: "rewrite", lane: "sonnet", risk: 0.4 }),
     () => ({ text: `Convert ${(Math.random() * 100).toFixed(2)} USD to ${pick(["EUR", "GBP", "JPY", "CAD"])} at today's rate.`, kind: "math", lane: "tool", risk: 0.3 }),
+    // Genuinely under-specified — no router can tell what tier this needs. This is the one case that
+    // legitimately abstains to REVIEW even in a fully-automated system: "I can't tell what you're asking."
+    () => ({ text: pick(["Can you help with the thing from yesterday?", "It's broken again — please fix.", "Follow up on the last ticket.", "Handle this when you get a chance.", "Same issue as before, you know the one.", "Do the needful for the usual account."]), kind: "vague", lane: "haiku", risk: 0.6 }),
     () => pick(ROUTER_TASKS), // mix in the curated corpus
   ];
   return pick(gens)();
@@ -355,26 +366,24 @@ function makeCustomTask(text: string): RouterTask {
 /**
  * Escalate to REVIEW on genuine uncertainty — NOT on task difficulty. A hard, high-stakes task
  * that Jev confidently types (e.g. a security review) is exactly what the `opus` lane is for;
- * routing it there is the right call, not a punt. Blanket `risk >= 2.8` made opus unreachable —
- * every task hard enough for opus tripped the risk wire straight to REVIEW. So REVIEW now fires
- * only when Jev genuinely can't route safely:
- *   - it flags the task as too ambiguous to act on (regardless of stakes — ambiguity means we
- *     literally don't know what's wanted), or
- *   - it's torn between tiers AND the stakes justify a human. A close tool-vs-haiku call on a
- *     reformat is a coin-flip that costs nothing to get wrong — just take the top lane; don't
- *     burn a human on it. Only escalate a torn decision when the blast radius is real AND a human
- *     could actually add value. When the contest is between the two frontier tiers (opus vs fable),
- *     a human adds nothing — either pick is an excellent model — so we keep Jev's own pick, not REVIEW.
+ * An automated router has no human to punt to for merely *hard* work, and bailing on a task Jev
+ * typed with 99% confidence makes no sense. So REVIEW is NOT "this is risky/hard" — hard, high-stakes
+ * work routes UP to a capable tier (opus/fable); that's the whole point. REVIEW is the one thing
+ * routing genuinely can't resolve: Jev can't tell which tier the task needs — a thin lead across a
+ * flat distribution ("I don't know what this is"). That abstain is rare. When the two contenders are
+ * both frontier tiers (opus vs fable) it isn't confusion about the *kind* of work — it's clearly hard —
+ * so route to the pick, don't abstain. `risk` and the human-oversight noul stay as advisory tags on
+ * the routed decision (shown in the feed/ledger); they do not gate routing.
  */
 const FRONTIER_TIERS = new Set(["opus", "fable"]);
-function routeEscalated(laneProbs: Record<string, number>, confidence: number, needHuman: number, risk: number): boolean {
+function routeEscalated(laneProbs: Record<string, number>, confidence: number): boolean {
+  // LIVE Jev concentrates probability on a clear pick (top prob ~0.9 on tasks it can classify), so a
+  // LOW top probability means the mass is spread flat across tiers — it genuinely can't tell what this is.
   const ranked = Object.entries(laneProbs).sort((a, b) => b[1] - a[1]);
   const top = ranked[0];
   const second = ranked[1];
-  const margin = (top ? top[1] : confidence) - (second ? second[1] : 0);
   const bothFrontier = !!top && !!second && FRONTIER_TIERS.has(top[0]) && FRONTIER_TIERS.has(second[0]);
-  const tornOnStakes = margin < 0.15 && risk >= 1.8 && !bothFrontier;
-  return needHuman > 0.8 || tornOnStakes;
+  return confidence < 0.35 && !bothFrontier; // abstain only on a genuinely flat distribution, never on difficulty
 }
 
 async function routerDecide(task: RouterTask, id: number): Promise<RouterDecision> {
@@ -385,7 +394,7 @@ async function routerDecide(task: RouterTask, id: number): Promise<RouterDecisio
     const route = res.answers.route;
     const risk = res.answers.risk;
     const needHuman = res.answers.needHuman.noul;
-    const escalated = routeEscalated(route.probabilities, route.confidence, needHuman, risk.score);
+    const escalated = routeEscalated(route.probabilities, route.confidence);
     return {
       id, task: task.text, kind: task.kind,
       lane: route.choice, laneProbs: route.probabilities,
@@ -395,15 +404,15 @@ async function routerDecide(task: RouterTask, id: number): Promise<RouterDecisio
     };
   }
   // sim
-  const laneProbs = softmaxNoise(Object.keys(routerQuestions.route.criteria), task.lane, 2.2 + Math.random());
-  const confidence = laneProbs[task.lane]!;
-  // needHuman now means "too ambiguous to act on" — a property of the *task*, not its risk. Only the
-  // genuinely under-specified kinds lean high: spam-or-real triage, vague support asks, and a free-typed
-  // task ONLY when guessLane couldn't classify it (fell through to the "haiku" default). A clearly-scoped
-  // custom task ("review this auth flow for IDOR") routes to its tier confidently — it isn't ambiguous.
+  // A task is tier-ambiguous when Jev couldn't tell what KIND of work it is: spam-or-real triage,
+  // moderation, or a free-typed task guessLane couldn't classify (fell through to the "haiku" default).
   const vagueCustom = task.kind === "custom" && task.lane === "haiku";
-  const ambiguous = vagueCustom || /classify|moderation|support/.test(task.kind);
-  const needHuman = Math.min(1, Math.max(0, (ambiguous ? 0.72 : 0.15) + (Math.random() - 0.5) * 0.45));
+  const ambiguous = vagueCustom || /classify|moderation|vague/.test(task.kind);
+  // Ambiguous → a FLAT distribution (thin margin) → abstain to REVIEW. Everything else → a sharp pick.
+  const sharp = ambiguous ? 0.5 + Math.random() * 0.4 : 2.2 + Math.random();
+  const laneProbs = softmaxNoise(Object.keys(routerQuestions.route.criteria), task.lane, sharp);
+  const confidence = laneProbs[task.lane]!;
+  const needHuman = Math.min(1, Math.max(0, (ambiguous ? 0.72 : 0.15) + (Math.random() - 0.5) * 0.45)); // advisory only
   const risk = Math.max(0, Math.min(3, task.risk + (Math.random() - 0.5) * 0.5));
   return {
     id, task: task.text, kind: task.kind,
@@ -411,7 +420,7 @@ async function routerDecide(task: RouterTask, id: number): Promise<RouterDecisio
     confidence, latencyMs: simJevLatency(),
     costUsd: (60 + Math.random() * 90) * (0.042 / 1_000_000),
     inputTokens: Math.round(60 + Math.random() * 90),
-    escalated: routeEscalated(laneProbs, confidence, needHuman, risk),
+    escalated: routeEscalated(laneProbs, confidence),
   };
 }
 

@@ -30,7 +30,7 @@ export interface RouterDecision {
   latencyMs: number;
   costUsd: number;
   inputTokens: number;
-  /** low confidence / high risk / needs-human -> escalated instead of guessed. */
+  /** flat tier distribution (top prob < 0.35) -> abstained to REVIEW; risk/needHuman are advisory, not gates. */
   escalated: boolean;
 }
 
