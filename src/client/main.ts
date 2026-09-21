@@ -729,9 +729,9 @@ function connect() {
   };
   ws.onclose = () => { badge.dataset.mode = "sim"; badgeText.textContent = "reconnecting…"; setTimeout(connect, 1200); };
 }
-function currentScene(): "router" | "swarm" | "gauntlet" {
+function currentScene(): "router" | "reflex" | "swarm" | "gauntlet" {
   const sel = document.querySelector('#tabs button[aria-selected="true"]') as HTMLButtonElement | null;
-  return (sel?.dataset.scene as any) ?? "router";
+  return (sel?.dataset.scene as "router" | "reflex" | "swarm" | "gauntlet") ?? "router";
 }
 function applyHealth(h: Health) {
   badge.dataset.mode = h.mode;

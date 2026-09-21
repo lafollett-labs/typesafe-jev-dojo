@@ -35,7 +35,7 @@ the keys and makes every decision call; the browser is a pure renderer.
 | Scene | What it shows |
 | - | - |
 | **Router** | Tasks stream in; Jev answers **3 typed questions** each — *which model tier* (choice) · *needs a human?* (noul) · *operational risk* (score) — and routes each task down a neon lane. Low confidence / high risk / needs-human **escalates to REVIEW** instead of guessing. Live throughput, latency, $-saved-vs-Opus, and a decision feed. **Starts paused.** |
-| **Stacker** | **Jev plays Tetris.** Every piece is **one typed `choice`** over *every* legal placement (column × rotation), each option described by the board it produces — `clears N · +H holes · top M · bump B`. No look-ahead search — just a fast typed decision per piece. Real line clears, real top-out + auto-reset. In SIM the pick uses the El-Tetris heuristic. **Starts paused.** |
+| **Stacker** | **Jev plays Tetris.** Every piece is **one typed `choice`** over *every* legal placement (column × rotation), each option described by the board it produces — `clears N · +H holes · top M · bump B`. No look-ahead search — just a fast typed decision per piece. Real line clears; on top-out it stops and waits for Start. In SIM the pick uses a genetic-algorithm-tuned heuristic. **Starts paused.** |
 | **Swarm** | Broadcast one event; Jev fires **N decisions in parallel**; hundreds of agents react, colored by their choice and haloed by confidence. |
 | **Gauntlet** | The honest scene: the same labeled tasks → **Jev vs. Claude**, scored against ground truth. Green/red per task, plus accuracy / latency / cost bars — the numbers the demos skip. |
 
@@ -96,9 +96,9 @@ actually deploy a fast typed model. Jev has no search and no Tetris knowledge:
    next-best by +20% is decisive even though the raw probability looks modest.
 
 On top-out the game **stops** and waits — press Start for a fresh game. In **SIM mode** the
-same candidate set is scored by the classic El-Tetris weights
-(`0.76·lines − 0.51·aggHeight − 0.36·holes − 0.18·bumpiness`), which plays near-optimally —
-a useful yardstick for the live model.
+same candidate set is scored by a well-known genetic-algorithm-tuned heuristic (Yiyuan Lee's
+weights: `0.76·lines − 0.51·aggHeight − 0.36·holes − 0.18·bumpiness`), which plays
+near-optimally — a useful yardstick for the live model.
 
 ## Layout
 
@@ -106,7 +106,7 @@ a useful yardstick for the live model.
 src/jev/          Typed Jev client — answers inferred from your questions; native + OpenRouter transports
 src/shared/       WebSocket protocol shared by server and client
 src/server/       Demo server: live Jev + Claude-subscription opponent, SIM fallback, scene engines
-src/server/stacker.ts   Pure Tetris engine (rotations, placements, line clear, El-Tetris scoring)
+src/server/stacker.ts   Pure Tetris engine (rotations, placements, line clear, heuristic scoring)
 src/client/       Canvas UI (index.html + main.ts, bundled on the fly by esbuild, hot-reload)
 src/smoke.ts      One-shot decision proof
 docs/             Verified API contract + research dossier

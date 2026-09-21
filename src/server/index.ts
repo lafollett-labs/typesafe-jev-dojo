@@ -317,7 +317,7 @@ interface Decision { placement: Placement; confidence: number; margin: number; o
 /**
  * Build Jev's candidate pool: prune self-destructive moves, then shortlist the strongest.
  *   1) never offer a hole-burying move when a clean one exists (stops the death spiral),
- *   2) keep the top STACKER_SHORTLIST by El-Tetris score, presented in NATURAL board order
+ *   2) keep the top STACKER_SHORTLIST by heuristic score, presented in NATURAL board order
  *      (a strong candidate set, but we don't nudge which one Jev picks).
  * This is candidate-generation + Jev-as-judge — how you'd actually deploy a fast typed model.
  */
@@ -332,11 +332,15 @@ function candidatePool(placements: Placement[], baseHoles: number): Placement[] 
   return clean.filter((p) => keep.has(p.key));
 }
 
-/** Pick a placement: Jev via one typed choice, or the El-Tetris heuristic in SIM. */
+/** Pick a placement: Jev via one typed choice, or a GA-tuned heuristic in SIM. */
 async function stackerDecide(s: StackerState, placements: Placement[]): Promise<Decision> {
   const view = boardView(s.grid);
   const pool = candidatePool(placements, view.holes);
   const byKey = new Map(pool.map((p) => [p.key, p]));
+
+  // Forced move: one candidate means no decision to make. Skip the call entirely — it would be
+  // a wasted bill, and a single-option `choice` depends on the remote API accepting it.
+  if (pool.length === 1) return { placement: pool[0]!, confidence: 1, margin: 1, options: 1, latencyMs: 0, inputTokens: 0, costUsd: 0 };
 
   if (jev) {
     const criteria: Record<string, string> = {};
@@ -356,7 +360,7 @@ async function stackerDecide(s: StackerState, placements: Placement[]): Promise<
     return { placement, confidence: res.answers.place.confidence, margin, options: pool.length, latencyMs: performance.now() - t0, inputTokens: res.usage.input_tokens, costUsd: estimateCostUSD(res.usage) };
   }
 
-  // SIM: max El-Tetris score, with a rare slip among the top few so it isn't robotic.
+  // SIM: max heuristic score, with a rare slip among the top few so it isn't robotic.
   const ranked = [...pool].sort((a, b) => b.score - a.score);
   const placement = Math.random() < 0.05 ? pick(ranked.slice(0, Math.min(3, ranked.length))) : ranked[0]!;
   const gap = ranked.length > 1 ? placement.score - ranked[1]!.score : 1;

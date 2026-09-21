@@ -3,8 +3,9 @@
  *
  * Jev's job (in index.ts) is ONE `choice` per piece over every legal placement this
  * module enumerates; each option is described by the board it produces (lines cleared,
- * holes, height, bumpiness). The SIM fallback picks the max-scoring placement using the
- * well-known El-Tetris / Dellacherie weights, so no-key mode still plays beautifully.
+ * holes, height, bumpiness). The SIM fallback picks the max-scoring placement using a
+ * well-known genetic-algorithm-tuned heuristic (Yiyuan Lee's weights), so no-key mode
+ * still plays beautifully.
  */
 
 export const STACKER_ROWS = 16;
@@ -152,7 +153,7 @@ export function lockPiece(grid: Grid, id: PieceId, rot: number, col: number): Lo
   return { snapshot, collapsed: collapse(snapshot, full), full, cells };
 }
 
-/** Famous El-Tetris weights — plays near-perfectly, so SIM mode looks sharp. */
+/** Yiyuan Lee's GA-tuned weights over [lines, aggHeight, holes, bumpiness] — plays near-perfectly, so SIM looks sharp. */
 const W_LINES = 0.760666, W_AGG = -0.510066, W_HOLES = -0.35663, W_BUMP = -0.184483;
 
 export interface Placement {

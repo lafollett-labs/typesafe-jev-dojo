@@ -96,7 +96,7 @@ export interface StackerFrame {
   pieces: number;
   maxHeight: number;
   holes: number;
-  /** no legal placement remained — board topped out; server auto-resets after this frame. */
+  /** no legal placement remained — board topped out; the game STOPS and waits for the user to press Start. */
   gameOver: boolean;
   latencyMs: number;
   live: boolean;
