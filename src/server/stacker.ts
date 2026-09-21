@@ -159,6 +159,9 @@ export interface Placement {
   key: string; // `${rot}_${col}` — the choice key Jev returns
   rot: number;
   col: number;
+  /** footprint of this rotation: cells span columns col..col+w-1 and are h rows tall. */
+  w: number;
+  h: number;
   lines: number;
   maxHeight: number;
   aggHeight: number;
@@ -183,7 +186,7 @@ export function placementsFor(grid: Grid, id: PieceId): Placement[] {
       const bump = bumpiness(hs);
       const lines = full.length;
       out.push({
-        key: `${rot}_${col}`, rot, col, lines,
+        key: `${rot}_${col}`, rot, col, w: shape.w, h: shape.h, lines,
         maxHeight: Math.max(0, ...hs), aggHeight: agg, holes, bumpiness: bump,
         score: W_LINES * lines + W_AGG * agg + W_HOLES * holes + W_BUMP * bump,
       });
@@ -196,6 +199,22 @@ export function placementsFor(grid: Grid, id: PieceId): Placement[] {
 export function gridStats(grid: Grid): { maxHeight: number; holes: number } {
   const hs = columnHeights(grid);
   return { maxHeight: Math.max(0, ...hs), holes: countHoles(grid) };
+}
+
+/**
+ * Spatial view of the board for the decision state: a top-to-bottom ASCII matrix
+ * ("." empty, "#" filled) plus per-column surface heights. Lets a decision model
+ * reason about WHERE to place a piece, not just the resulting outcome numbers.
+ */
+export function boardView(grid: Grid): { rows: string[]; heights: number[]; maxHeight: number; holes: number } {
+  const rows: string[] = [];
+  for (let r = 0; r < ROWS; r++) {
+    let line = "";
+    for (let c = 0; c < COLS; c++) line += grid[idx(r, c)] ? "#" : ".";
+    rows.push(line);
+  }
+  const hs = columnHeights(grid);
+  return { rows, heights: hs, maxHeight: Math.max(0, ...hs), holes: countHoles(grid) };
 }
 
 /** Fisher-Yates shuffled 7-bag: fair, no droughts, no floods. */

@@ -34,6 +34,7 @@ import {
   lockPiece,
   placementsFor,
   gridStats,
+  boardView,
   sevenBag,
   type Grid,
   type PieceId,
@@ -304,7 +305,8 @@ const summarize = (p: Placement) => `clears ${p.lines} · holes ${p.holes} · to
  */
 const describeOption = (p: Placement, baseHoles: number) => {
   const dh = p.holes - baseHoles;
-  return `clears ${p.lines} · ${dh >= 0 ? "+" : ""}${dh} holes · top ${p.maxHeight} · bump ${p.bumpiness}`;
+  const span = p.w > 1 ? `cols ${p.col}-${p.col + p.w - 1}` : `col ${p.col}`;
+  return `${span} (${p.w}w×${p.h}h) · clears ${p.lines} · ${dh >= 0 ? "+" : ""}${dh} holes · top ${p.maxHeight} · bump ${p.bumpiness}`;
 };
 
 /** How many strong candidates Jev judges among (after pruning). Smaller = crisper confidence. */
@@ -332,21 +334,21 @@ function candidatePool(placements: Placement[], baseHoles: number): Placement[] 
 
 /** Pick a placement: Jev via one typed choice, or the El-Tetris heuristic in SIM. */
 async function stackerDecide(s: StackerState, placements: Placement[]): Promise<Decision> {
-  const base = gridStats(s.grid);
-  const pool = candidatePool(placements, base.holes);
+  const view = boardView(s.grid);
+  const pool = candidatePool(placements, view.holes);
   const byKey = new Map(pool.map((p) => [p.key, p]));
 
   if (jev) {
     const criteria: Record<string, string> = {};
-    for (const p of pool) criteria[p.key] = describeOption(p, base.holes);
+    for (const p of pool) criteria[p.key] = describeOption(p, view.holes);
     const q = {
       place: choice(
-        `Tetris — place the ${PIECE_NAMES[s.current]} piece (next: ${PIECE_NAMES[s.next]}). The stack tops out at height ${base.maxHeight}/${STACKER_ROWS} with ${base.holes} buried holes. Each option is a legal drop, described by its effect: lines it clears now, NEW holes it buries ("+0" is clean), the resulting top height, and bumpiness (surface roughness — lower is flatter). Choose in strict priority order: (1) clear lines when you can, (2) keep the top height LOW, (3) keep the surface FLAT (low bumpiness), (4) prefer edges/walls over the middle. Which single placement is best?`,
+        `Tetris on a ${STACKER_ROWS}×${STACKER_COLS} board. You are given "board" as a top-to-bottom matrix ("." = empty, "#" = filled, row 0 is the ceiling) and "column_heights" left-to-right. Place the ${PIECE_NAMES[s.current]} piece (next: ${PIECE_NAMES[s.next]}). Each option gives the columns it fills and its footprint (w×h — e.g. 1w×4h is an upright I, 4w×1h is flat), then its effect: lines cleared, NEW holes buried ("+0" is clean), resulting top height, and bumpiness (surface roughness — lower is flatter). Read the board: fill low spots and deep wells, rotate to fit narrow gaps. Priorities: (1) clear lines, (2) never bury holes, (3) keep the stack LOW, (4) keep the surface FLAT. Which single placement is best?`,
         criteria,
       ),
     };
     const t0 = performance.now();
-    const res = await jev.systemOne({ state: { piece: PIECE_NAMES[s.current], next: PIECE_NAMES[s.next], top_height: base.maxHeight, buried_holes: base.holes }, questions: q });
+    const res = await jev.systemOne({ state: { piece: PIECE_NAMES[s.current], next: PIECE_NAMES[s.next], board: view.rows, column_heights: view.heights, buried_holes: view.holes }, questions: q });
     // Only used if Jev echoes an unparseable key — fall back to the best move, not the leftmost.
     const placement = byKey.get(res.answers.place.choice) ?? [...pool].sort((a, b) => b.score - a.score)[0]!;
     const ps = Object.values(res.answers.place.probabilities).sort((a, b) => b - a);

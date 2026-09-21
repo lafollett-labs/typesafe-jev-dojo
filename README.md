@@ -86,8 +86,10 @@ actually deploy a fast typed model. Jev has no search and no Tetris knowledge:
 2. A cheap generator **prunes and shortlists**: it drops any move that buries a hole when a
    clean move exists (the one rule that prevents death spirals), then keeps the ~10 strongest
    candidates — presented to Jev in board order, so the pool is strong but the *pick* isn't nudged.
-3. Each candidate becomes a named `choice` **option**, described by its effect:
-   `clears 1 · +0 holes · top 5 · bump 3` (holes = empty cells this move would *bury*).
+3. Jev is handed the board itself — a top-to-bottom `#`/`.` **matrix** plus per-column heights —
+   and each candidate is described by its **footprint and columns** *and* its effect:
+   `cols 5-8 (4w×1h) · clears 1 · +0 holes · top 5 · bump 3`, so it can reason about *where* a
+   piece lands and *how* it's rotated, not just the resulting numbers.
 4. Jev returns the winning option key + per-option probabilities. The server locks that
    placement, clears full rows, and streams the new board. The readout shows Jev's confidence
    **and** its lead over the runner-up — with many near-equal moves, a 35% pick that beats the
@@ -114,6 +116,7 @@ docs/             Verified API contract + research dossier
 
 Node 26 · TypeScript 7 (strict, ESM) · `tsx` + esbuild (on-the-fly client bundle & hot
 reload) · `ws` · Canvas 2D. No framework, no build step to run — `npm run demo` and go.
+`node --watch` restarts the server on server-side edits; esbuild hot-reloads the client.
 
 ## Contributing
 
