@@ -377,7 +377,7 @@ class SwarmScene implements Scene {
     $("#sw-go").onclick = () => {
       send({ type: "swarm.broadcast", event: ($("#sw-event") as HTMLInputElement).value || "something is happening", count: Number(($("#sw-count") as HTMLInputElement).value) });
     };
-    note.textContent = "One broadcast → N Jev decisions fired in parallel. Each dot is one real decision; halo = confidence.";
+    note.textContent = "One broadcast → N Jev decisions in parallel — each agent reacts in character (a thief flees authority, a scholar investigates, a musician joins in). The crowd self-sorts into rings by decision: join in (center) · investigate · warn others · flee (edge). Halo = confidence.";
     send({ type: "scene", scene: "swarm" });
   }
   exit() {}
@@ -394,13 +394,16 @@ class SwarmScene implements Scene {
     } else if (m.type === "swarm.reaction") {
       const r: SwarmReaction = m.r; const a = this.agents.get(r.id); if (!a) return;
       a.action = r.action; a.conf = r.confidence; a.color = ACTION_COLOR[r.action] ?? C.muted; a.pop = 1;
-      const cx = W / 2, cy = H / 2;
-      const dx = a.x - cx, dy = a.y - cy, len = Math.hypot(dx, dy) || 1;
-      const push = (d: number) => { a.tx = clamp(a.x + (dx / len) * d, 30, W - 30); a.ty = clamp(a.y + (dy / len) * d, 60, H - 60); };
-      if (r.action === "flee") push(80 + Math.random() * 60);
-      else if (r.action === "join in") { a.tx = lerp(a.x, cx, 0.5 + Math.random() * 0.3); a.ty = lerp(a.y, cy, 0.5 + Math.random() * 0.3); }
-      else if (r.action === "investigate") { a.tx = lerp(a.x, cx, 0.2); a.ty = lerp(a.y, cy, 0.2); }
-      else if (r.action === "warn others") { a.tx = a.x + (Math.random() - 0.5) * 40; a.ty = a.y + (Math.random() - 0.5) * 40; }
+      // sort the crowd into concentric rings BY DECISION — emergent structure from individual choices
+      const cx = W / 2, cy = H / 2, minD = Math.min(W, H);
+      const ang = Math.atan2(a.y - cy, a.x - cx) + (Math.random() - 0.5) * 0.35;
+      const ringR: Record<string, number> = { "join in": 0.05, investigate: 0.20, "warn others": 0.32, flee: 0.45 };
+      if (r.action === "carry on") { a.tx = a.x + (Math.random() - 0.5) * 12; a.ty = a.y + (Math.random() - 0.5) * 12; }
+      else {
+        const rad = minD * ((ringR[r.action] ?? 0.25) + Math.random() * 0.05);
+        a.tx = clamp(cx + Math.cos(ang) * rad, 30, W - 30);
+        a.ty = clamp(cy + Math.sin(ang) * rad, 78, H - 92);
+      }
       this.tally[r.action] = (this.tally[r.action] ?? 0) + 1; this.reacted++;
     } else if (m.type === "swarm.done") this.done = performance.now();
   }
@@ -420,14 +423,19 @@ class SwarmScene implements Scene {
       glow(a.action ? a.color : "transparent", a.action ? 8 : 0, () => { ctx.beginPath(); ctx.arc(a.x, a.y, r, 0, 7); ctx.fillStyle = a.color; ctx.fill(); });
     }
     if (this.event) text(`“${this.event}”`, W / 2, 34, D(W < 620 ? 13 : 16), "#fff", "center");
+    // consensus headline — the crowd's dominant decision
+    const total = Object.values(this.tally).reduce((a, b) => a + b, 0);
+    let topAct = "", topN = 0;
+    for (const act of SWARM_ACTIONS) { const n = this.tally[act] ?? 0; if (n > topN) { topN = n; topAct = act; } }
+    if (total > 0) text(`consensus  ${topAct.toUpperCase()} · ${Math.round((topN / total) * 100)}%`, W / 2, 56, M(13), ACTION_COLOR[topAct] ?? C.text, "center");
     // tally legend top-right (clear of the HUD tiles and the bottom dock)
     const lx = Math.max(W - 300, W * 0.5);
     let ly = 100;
     const max = Math.max(1, ...Object.values(this.tally));
     for (const act of SWARM_ACTIONS) {
-      const n = this.tally[act] ?? 0, col = ACTION_COLOR[act]!;
+      const n = this.tally[act] ?? 0, col = ACTION_COLOR[act]!, isTop = total > 0 && act === topAct;
       ctx.fillStyle = col; ctx.globalAlpha = 0.9; rr(lx, ly, 9, 9, 2); ctx.fill(); ctx.globalAlpha = 1;
-      text(act, lx + 16, ly + 5, M(11), C.text);
+      text(isTop ? `▸ ${act}` : act, lx + 16, ly + 5, M(11), isTop ? col : C.text);
       const bw = 120 * (n / max);
       ctx.fillStyle = "rgba(255,255,255,0.08)"; rr(lx + 108, ly, 120, 9, 3); ctx.fill();
       ctx.fillStyle = col; rr(lx + 108, ly, Math.max(2, bw), 9, 3); ctx.fill();

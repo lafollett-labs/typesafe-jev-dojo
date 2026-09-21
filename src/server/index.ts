@@ -108,10 +108,26 @@ const ROUTER_TASKS: RouterTask[] = [
   { text: "Rewrite this paragraph to be warmer but keep the facts.", kind: "rewrite", lane: "sonnet", risk: 0.5 },
 ];
 
-const SWARM_PERSONAS = [
-  "baker", "guard", "child", "merchant", "farmer", "elder", "thief", "priest",
-  "blacksmith", "traveler", "musician", "dog", "cat", "noble", "beggar", "sailor",
+interface Persona { role: string; desc: string }
+const SWARM_PERSONAS: Persona[] = [
+  { role: "baker", desc: "a busy baker who cares about their shop and regular customers" },
+  { role: "town guard", desc: "a dutiful guard responsible for public safety and order" },
+  { role: "child", desc: "a curious, easily-excited child with no sense of danger" },
+  { role: "merchant", desc: "a shrewd merchant always chasing profit or a bargain" },
+  { role: "farmer", desc: "a practical farmer focused on their crops and livestock" },
+  { role: "village elder", desc: "a cautious elder who values tradition and fears risk" },
+  { role: "thief", desc: "an opportunist who exploits chaos and avoids authority" },
+  { role: "priest", desc: "a calm priest who tends to people and keeps the peace" },
+  { role: "blacksmith", desc: "a strong, level-headed blacksmith, not easily rattled" },
+  { role: "traveler", desc: "a wary outsider unfamiliar with local dangers" },
+  { role: "musician", desc: "a social performer drawn to crowds and celebrations" },
+  { role: "healer", desc: "a healer who rushes toward anyone in trouble" },
+  { role: "noble", desc: "a proud noble who expects others to handle problems" },
+  { role: "beggar", desc: "a hungry beggar hoping any commotion brings opportunity" },
+  { role: "sailor", desc: "a rough sailor used to storms and quick to act" },
+  { role: "scholar", desc: "an inquisitive scholar compelled to investigate anything new" },
 ];
+const PERSONA_DESC: Record<string, string> = Object.fromEntries(SWARM_PERSONAS.map((p) => [p.role, p.desc]));
 
 interface LabeledTask { text: string; truth: string }
 const GAUNTLET_LABELS = ["billing", "technical", "sales", "spam"];
@@ -294,8 +310,9 @@ async function routerDecide(task: RouterTask, id: number): Promise<RouterDecisio
 
 async function swarmReact(persona: string, event: string): Promise<{ action: string; confidence: number; latencyMs: number; inputTokens: number; costUsd: number }> {
   if (jev) {
+    const disposition = PERSONA_DESC[persona] ?? persona;
     const q = {
-      reaction: choice(`A villager whose role is "${persona}" hears a town announcement. How do they react?`, {
+      reaction: choice(`A townsperson hears a public announcement. Given who they are, how do they react?`, {
         "carry on": "Ignore it and keep doing their thing",
         investigate: "Cautiously go look into it",
         "join in": "Enthusiastically participate",
@@ -304,7 +321,7 @@ async function swarmReact(persona: string, event: string): Promise<{ action: str
       }),
     };
     const t0 = performance.now();
-    const res = await jev.systemOne({ state: { announcement: event, role: persona }, questions: q });
+    const res = await jev.systemOne({ state: { announcement: event, role: persona, disposition }, questions: q });
     return { action: res.answers.reaction.choice, confidence: res.answers.reaction.confidence, latencyMs: performance.now() - t0, inputTokens: res.usage.input_tokens, costUsd: estimateCostUSD(res.usage) };
   }
   const danger = /snake|poison|bite|flee|run|evacuate|storm|bitten/i.test(event);
@@ -609,7 +626,7 @@ class Session {
     const signal = this.reset();
     const n = Math.max(1, Math.min(count, 600));
     const agents: SwarmAgentInit[] = Array.from({ length: n }, (_, i) => ({
-      id: i, x: Math.random(), y: Math.random(), persona: pick(SWARM_PERSONAS),
+      id: i, x: Math.random(), y: Math.random(), persona: pick(SWARM_PERSONAS).role,
     }));
     this.send({ type: "swarm.init", agents, event });
     const totals = { tokens: 0, cost: 0, lat: 0, n: 0 };
