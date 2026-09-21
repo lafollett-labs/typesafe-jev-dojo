@@ -276,6 +276,17 @@ function makeCustomTask(text: string): RouterTask {
   return { text: text.slice(0, 400), kind: "custom", lane: guessLane(text), risk: guessRisk(text) };
 }
 
+/**
+ * Escalate to REVIEW only when it's genuinely warranted: a human flag, high risk, or Jev is
+ * torn between tiers (the top lane barely leads the runner-up). Raw confidence < 0.5 was too
+ * aggressive — probability is naturally diluted across 5 lanes, so a clear pick can read < 0.5.
+ */
+function routeEscalated(laneProbs: Record<string, number>, confidence: number, needHuman: number, risk: number): boolean {
+  const sorted = Object.values(laneProbs).sort((a, b) => b - a);
+  const margin = (sorted[0] ?? confidence) - (sorted[1] ?? 0);
+  return needHuman > 0.7 || risk >= 2.8 || margin < 0.1;
+}
+
 async function routerDecide(task: RouterTask, id: number): Promise<RouterDecision> {
   if (jev) {
     const t0 = performance.now();
@@ -284,7 +295,7 @@ async function routerDecide(task: RouterTask, id: number): Promise<RouterDecisio
     const route = res.answers.route;
     const risk = res.answers.risk;
     const needHuman = res.answers.needHuman.noul;
-    const escalated = route.confidence < 0.5 || needHuman > 0.7 || risk.score >= 2.8;
+    const escalated = routeEscalated(route.probabilities, route.confidence, needHuman, risk.score);
     return {
       id, task: task.text, kind: task.kind,
       lane: route.choice, laneProbs: route.probabilities,
@@ -304,7 +315,7 @@ async function routerDecide(task: RouterTask, id: number): Promise<RouterDecisio
     confidence, latencyMs: simJevLatency(),
     costUsd: (60 + Math.random() * 90) * (0.042 / 1_000_000),
     inputTokens: Math.round(60 + Math.random() * 90),
-    escalated: confidence < 0.5 || needHuman > 0.7 || risk >= 2.8,
+    escalated: routeEscalated(laneProbs, confidence, needHuman, risk),
   };
 }
 
@@ -649,7 +660,10 @@ class Session {
 
   private async runGauntlet(count: number) {
     const signal = this.reset();
-    const tasks = GAUNTLET_TASKS.slice(0, Math.max(1, Math.min(count, GAUNTLET_TASKS.length)));
+    // shuffle so a partial run (count < full set) samples across all categories, not just the first
+    const shuffled = [...GAUNTLET_TASKS];
+    for (let i = shuffled.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!]; }
+    const tasks = shuffled.slice(0, Math.max(1, Math.min(count, shuffled.length)));
     let id = 0;
     for (const t of tasks) {
       if (signal.aborted) return;
