@@ -116,22 +116,52 @@ const SWARM_PERSONAS = [
 interface LabeledTask { text: string; truth: string }
 const GAUNTLET_LABELS = ["billing", "technical", "sales", "spam"];
 const GAUNTLET_TASKS: LabeledTask[] = [
+  // billing
   { text: "I was double charged on my last invoice, please refund one.", truth: "billing" },
-  { text: "The webhook stopped firing after your API update this morning.", truth: "technical" },
-  { text: "Do you offer volume pricing for 50+ seats?", truth: "sales" },
-  { text: "Congrats! You won a $500 gift card, claim at freegc.ru now!!", truth: "spam" },
   { text: "My card was declined but I still got charged twice.", truth: "billing" },
-  { text: "Getting a 500 error when uploading files over 2MB.", truth: "technical" },
-  { text: "Can I get a demo before my team commits to annual?", truth: "sales" },
-  { text: "URGENT: verify your account or it will be deleted — click here.", truth: "spam" },
   { text: "Why does my receipt show tax for a tax-exempt org?", truth: "billing" },
-  { text: "The SDK throws 'invalid grant' on token refresh.", truth: "technical" },
-  { text: "What's the difference between the Pro and Scale plans?", truth: "sales" },
-  { text: "Hot singles in your area want to connect, tap to view.", truth: "spam" },
   { text: "Please cancel my subscription and stop billing me.", truth: "billing" },
+  { text: "I upgraded mid-cycle — was I supposed to be charged the full amount?", truth: "billing" },
+  { text: "There's a $49 charge I don't recognize on my statement.", truth: "billing" },
+  { text: "Can you send me a copy of last quarter's invoices for accounting?", truth: "billing" },
+  { text: "My renewal charged in USD but my account is set to EUR.", truth: "billing" },
+  { text: "I disputed a charge with my bank; how do I resolve it with you directly?", truth: "billing" },
+  { text: "Do refunds go back to the original card or account credit?", truth: "billing" },
+  // technical
+  { text: "The webhook stopped firing after your API update this morning.", truth: "technical" },
+  { text: "Getting a 500 error when uploading files over 2MB.", truth: "technical" },
+  { text: "The SDK throws 'invalid grant' on token refresh.", truth: "technical" },
   { text: "Dark mode toggle doesn't persist after refresh.", truth: "technical" },
+  { text: "Rate limits kick in way earlier than the 1000/min the docs promise.", truth: "technical" },
+  { text: "Pagination cursor returns duplicate rows on page 3.", truth: "technical" },
+  { text: "OAuth redirect loops back to login in Safari only.", truth: "technical" },
+  { text: "The CSV export truncates at 65k rows.", truth: "technical" },
+  { text: "Timestamps come back in UTC but the dashboard shows local — which is right?", truth: "technical" },
+  { text: "Your status page says operational but our requests all time out.", truth: "technical" },
+  // sales
+  { text: "Do you offer volume pricing for 50+ seats?", truth: "sales" },
+  { text: "Can I get a demo before my team commits to annual?", truth: "sales" },
+  { text: "What's the difference between the Pro and Scale plans?", truth: "sales" },
   { text: "We're evaluating vendors — can you send a security whitepaper?", truth: "sales" },
+  { text: "Is there a nonprofit or education discount?", truth: "sales" },
+  { text: "Does the Enterprise tier include a dedicated success manager?", truth: "sales" },
+  { text: "Can we pay by invoice/PO instead of credit card?", truth: "sales" },
+  { text: "How many API calls are included before overage pricing?", truth: "sales" },
+  { text: "Is SSO/SAML included in Pro or only Enterprise?", truth: "sales" },
+  { text: "We need SOC 2 and a signed DPA before we can purchase.", truth: "sales" },
+  // spam
+  { text: "Congrats! You won a $500 gift card, claim at freegc.ru now!!", truth: "spam" },
+  { text: "URGENT: verify your account or it will be deleted — click here.", truth: "spam" },
+  { text: "Hot singles in your area want to connect, tap to view.", truth: "spam" },
   { text: "Your package is held, pay $1.99 customs fee: track-now.biz", truth: "spam" },
+  { text: "Make $5000/week working from home — reply YES to start.", truth: "spam" },
+  { text: "Your mailbox is full, re-validate credentials at secure-login.ru.", truth: "spam" },
+  { text: "We noticed unusual sign-in. Confirm your password here immediately.", truth: "spam" },
+  { text: "Crypto giveaway! Send 0.1 BTC, get 1 BTC back — limited time.", truth: "spam" },
+  // deliberately ambiguous (the interesting confusion-matrix cases)
+  { text: "My annual plan renewed before I could downgrade — can I get the difference back?", truth: "billing" },
+  { text: "The invoice API returns 403 for my newly generated key.", truth: "technical" },
+  { text: "If I hit my seat limit mid-month, am I auto-charged or blocked?", truth: "sales" },
 ];
 
 // --- Jev question sets ------------------------------------------------------

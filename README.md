@@ -37,7 +37,7 @@ the keys and makes every decision call; the browser is a pure renderer.
 | **Router** | An **endless, self-generating stream** of realistic tasks (or **type your own** and route it live, even while paused). Jev answers **3 typed questions** each — *which model tier* (choice) · *needs a human?* (noul) · *operational risk* (score) — and routes each down a neon lane. Low confidence / high risk / needs-human **escalates to REVIEW** instead of guessing. Live throughput, latency, $-saved-vs-Opus, and a decision feed. **Start / Pause / Reset.** |
 | **Stacker** | **Jev plays Tetris.** Every piece is **one typed `choice`** over *every* legal placement (column × rotation), each option described by the board it produces — `clears N · +H holes · top M · bump B`. No look-ahead search — just a fast typed decision per piece. Real line clears; on top-out it stops and waits for Start. In SIM the pick uses a genetic-algorithm-tuned heuristic. **Starts paused.** |
 | **Swarm** | Broadcast one event; Jev fires **N decisions in parallel**; hundreds of agents react, colored by their choice and haloed by confidence. |
-| **Gauntlet** | The honest scene: the same labeled tasks → **Jev vs. Claude**, scored against ground truth. Green/red per task, plus accuracy / latency / cost bars — the numbers the demos skip. |
+| **Gauntlet** | The honest scene: a **40-task labeled set** (with deliberately ambiguous cases) → **Jev vs. Claude**, scored against ground truth. Green/red per task, accuracy / latency / cost bars, **per-category accuracy**, and a **confusion matrix** showing exactly which categories Jev mixes up — the numbers the demos skip. |
 
 ### Controls & stopping
 

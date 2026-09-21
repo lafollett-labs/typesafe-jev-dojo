@@ -442,9 +442,15 @@ class SwarmScene implements Scene {
 // ===========================================================================
 // GAUNTLET
 // ===========================================================================
+const GAUNTLET_CATS = [
+  { key: "billing", ab: "BIL" },
+  { key: "technical", ab: "TEC" },
+  { key: "sales", ab: "SAL" },
+  { key: "spam", ab: "SPM" },
+];
 class GauntletScene implements Scene {
   private results: GauntletResult[] = [];
-  private total = 8;
+  private total = 16;
   private jev = { n: 0, ok: 0, lat: 0, cost: 0 };
   private llm = { n: 0, ok: 0, lat: 0, cost: 0 };
   private running = false;
@@ -455,8 +461,8 @@ class GauntletScene implements Scene {
     dock.innerHTML = "";
     const panel = document.createElement("div"); panel.className = "panel controls";
     panel.innerHTML = `
-      <label>tasks <span id="g-n">8</span></label>
-      <input type="range" id="g-count" min="4" max="16" step="1" value="8" />
+      <label>tasks <span id="g-n">16</span></label>
+      <input type="range" id="g-count" min="4" max="40" step="1" value="16" />
       <button class="btn" id="g-go">Run gauntlet ▸</button>`;
     dock.appendChild(panel);
     ($("#g-count") as HTMLInputElement).oninput = (e) => { $("#g-n").textContent = (e.target as HTMLInputElement).value; };
@@ -465,7 +471,7 @@ class GauntletScene implements Scene {
       this.total = Number(($("#g-count") as HTMLInputElement).value); this.running = true;
       send({ type: "gauntlet.start", count: this.total });
     };
-    note.textContent = "Same labeled tasks → Jev vs Claude. Ticks: green = matched ground truth, red = missed. The bars are what the hype videos never show.";
+    note.textContent = "Same labeled tasks → Jev vs Claude. Ticks: green = matched ground truth, red = missed. The bars + confusion matrix are what the hype videos never show — including exactly WHICH categories Jev mixes up.";
     send({ type: "scene", scene: "gauntlet" });
   }
   exit() {}
@@ -511,18 +517,62 @@ class GauntletScene implements Scene {
     const winner = lowerBetter ? (jevVal <= llmVal ? "JEV" : "CLA") : (jevVal >= llmVal ? "JEV" : "CLA");
     text(`▲ ${winner}`, x0 + w - 4, y - 14, M(9.5), winner === "JEV" ? C.jev : C.cyan, "right");
   }
+  /** Jev confusion matrix (actual ↓ vs predicted →) — shows exactly which categories it mixes up. */
+  private drawConfusion(x0: number, y0: number) {
+    const cats = GAUNTLET_CATS, cell = 36, lx = 46, ty = 26;
+    text("JEV — CONFUSION  (actual ↓ · predicted →)", x0, y0, M(10.5), C.muted);
+    const cnt = new Map<string, Map<string, number>>();
+    for (const a of cats) { const m = new Map<string, number>(); for (const b of cats) m.set(b.key, 0); cnt.set(a.key, m); }
+    let maxc = 1;
+    for (const r of this.results) {
+      const row = cnt.get(r.truth);
+      if (row && row.has(r.jev.answer)) { const v = (row.get(r.jev.answer) ?? 0) + 1; row.set(r.jev.answer, v); maxc = Math.max(maxc, v); }
+    }
+    cats.forEach((b, j) => text(b.ab, x0 + lx + j * cell + cell / 2, y0 + ty - 10, M(9), C.muted, "center"));
+    cats.forEach((a, i) => {
+      const yy = y0 + ty + i * cell;
+      text(a.ab, x0 + lx - 6, yy + cell / 2, M(9), C.muted, "right");
+      cats.forEach((b, j) => {
+        const xx = x0 + lx + j * cell;
+        const v = cnt.get(a.key)?.get(b.key) ?? 0;
+        const correct = a.key === b.key, col = correct ? C.green : C.red;
+        ctx.globalAlpha = v ? 0.15 + 0.6 * (v / maxc) : 0.05;
+        ctx.fillStyle = v ? col : "rgba(255,255,255,0.4)";
+        rr(xx + 2, yy + 2, cell - 4, cell - 4, 5); ctx.fill();
+        ctx.globalAlpha = 1;
+        if (v) text(String(v), xx + cell / 2, yy + cell / 2, M(11.5), correct ? "#eafff5" : "#ffe9ec", "center");
+      });
+    });
+  }
+  /** Per-category accuracy for Jev (diagonal / row total). */
+  private drawCatAcc(x0: number, y0: number) {
+    text("PER-CATEGORY  (Jev accuracy)", x0, y0, M(10.5), C.muted);
+    GAUNTLET_CATS.forEach((c, i) => {
+      const rows = this.results.filter((r) => r.truth === c.key);
+      const ok = rows.filter((r) => r.jev.correct).length;
+      const acc = rows.length ? ok / rows.length : 0;
+      const yy = y0 + 26 + i * 24;
+      text(c.ab, x0, yy, M(11), C.text);
+      const bx = x0 + 44, bw = 120;
+      ctx.fillStyle = "rgba(255,255,255,0.07)"; rr(bx, yy - 7, bw, 12, 4); ctx.fill();
+      glow(C.jev, 6, () => { ctx.fillStyle = C.jev; rr(bx, yy - 7, Math.max(2, bw * acc), 12, 4); ctx.fill(); });
+      text(rows.length ? `${Math.round(acc * 100)}% (${ok}/${rows.length})` : "—", bx + bw + 8, yy, M(10), C.muted);
+    });
+  }
   frame(dt: number, now: number) {
     bgGrid();
     for (const a of this.anims) a.pop = Math.max(0, a.pop - dt * 1.5);
     text("THE GAUNTLET", 24, 40, D(18), "#fff");
     text(this.running ? "running…" : this.results.length ? "complete" : "press run", 200, 40, M(11), this.running ? C.amber : C.muted);
-    this.track("JEV", C.jev, H * 0.34, this.jev, 0, now);
-    this.track("CLAUDE", C.cyan, H * 0.60, this.llm, 1, now);
+    this.track("JEV", C.jev, H * 0.30, this.jev, 0, now);
+    this.track("CLAUDE", C.cyan, H * 0.44, this.llm, 1, now);
     const jAcc = this.jev.n ? (this.jev.ok / this.jev.n) * 100 : 0;
     const lAcc = this.llm.n ? (this.llm.ok / this.llm.n) * 100 : 0;
-    this.bar("ACCURACY  (higher = better)", H * 0.28, jAcc, lAcc, (n) => n.toFixed(0) + "%", false);
-    this.bar("AVG LATENCY  (lower = better)", H * 0.48, this.jev.n ? this.jev.lat / this.jev.n : 0, this.llm.n ? this.llm.lat / this.llm.n : 0, (n) => Math.round(n) + "ms", true);
-    this.bar("TOTAL COST  (lower = better)", H * 0.68, this.jev.cost, this.llm.cost, (n) => "$" + n.toFixed(4), true);
+    this.bar("ACCURACY  (higher = better)", H * 0.26, jAcc, lAcc, (n) => n.toFixed(0) + "%", false);
+    this.bar("AVG LATENCY  (lower = better)", H * 0.46, this.jev.n ? this.jev.lat / this.jev.n : 0, this.llm.n ? this.llm.lat / this.llm.n : 0, (n) => Math.round(n) + "ms", true);
+    this.bar("TOTAL COST  (lower = better)", H * 0.66, this.jev.cost, this.llm.cost, (n) => "$" + n.toFixed(4), true);
+    this.drawConfusion(24, H * 0.58);
+    this.drawCatAcc(330, H * 0.58);
   }
 }
 
