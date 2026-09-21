@@ -470,7 +470,7 @@ class GauntletScene implements Scene {
     const panel = document.createElement("div"); panel.className = "panel controls";
     panel.innerHTML = `
       <label>tasks <span id="g-n">16</span></label>
-      <input type="range" id="g-count" min="4" max="40" step="1" value="16" />
+      <input type="range" id="g-count" min="4" max="41" step="1" value="16" />
       <button class="btn" id="g-go">Run gauntlet ▸</button>`;
     dock.appendChild(panel);
     ($("#g-count") as HTMLInputElement).oninput = (e) => { $("#g-n").textContent = (e.target as HTMLInputElement).value; };

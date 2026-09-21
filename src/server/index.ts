@@ -20,6 +20,7 @@ import type {
   ClientMsg,
   GauntletResult,
   Health,
+  SceneId,
   StackerFrame,
   RouterDecision,
   ServerMsg,
@@ -128,6 +129,25 @@ const SWARM_PERSONAS: Persona[] = [
   { role: "scholar", desc: "an inquisitive scholar compelled to investigate anything new" },
 ];
 const PERSONA_DESC: Record<string, string> = Object.fromEntries(SWARM_PERSONAS.map((p) => [p.role, p.desc]));
+/** SIM-only: each persona's leaning, so the no-key demo is also in-character (LIVE uses Jev). */
+const PERSONA_BIAS: Record<string, string[]> = {
+  baker: ["carry on", "investigate", "warn others"],
+  "town guard": ["investigate", "warn others", "warn others"],
+  child: ["investigate", "join in", "join in"],
+  merchant: ["carry on", "investigate", "flee"],
+  farmer: ["carry on", "carry on", "investigate"],
+  "village elder": ["warn others", "flee", "investigate"],
+  thief: ["flee", "flee", "carry on"],
+  priest: ["warn others", "investigate", "join in"],
+  blacksmith: ["carry on", "investigate", "warn others"],
+  traveler: ["investigate", "flee", "carry on"],
+  musician: ["join in", "join in", "investigate"],
+  healer: ["investigate", "join in", "warn others"],
+  noble: ["carry on", "carry on", "warn others"],
+  beggar: ["carry on", "join in", "investigate"],
+  sailor: ["investigate", "warn others", "join in"],
+  scholar: ["investigate", "investigate", "carry on"],
+};
 
 interface LabeledTask { text: string; truth: string }
 const GAUNTLET_LABELS = ["billing", "technical", "sales", "spam"];
@@ -335,10 +355,10 @@ async function swarmReact(persona: string, event: string): Promise<{ action: str
     const res = await jev.systemOne({ state: { announcement: event, role: persona, disposition }, questions: q });
     return { action: res.answers.reaction.choice, confidence: res.answers.reaction.confidence, latencyMs: performance.now() - t0, inputTokens: res.usage.input_tokens, costUsd: estimateCostUSD(res.usage) };
   }
-  const danger = /snake|poison|bite|flee|run|evacuate|storm|bitten/i.test(event);
-  const winner = danger
-    ? pick(["flee", "flee", "warn others", "investigate", "carry on"])
-    : pick(["carry on", "carry on", "investigate", "join in", "warn others"]);
+  // sim: driven by the persona's disposition, nudged toward flee/warn if the event sounds dangerous
+  const danger = /snake|poison|bit(e|ten)|evacuat|storm|seize|arrest|attack|flood|beware|do not|gone bad|danger|threat/i.test(event);
+  const bias = PERSONA_BIAS[persona] ?? ["carry on", "investigate", "join in"];
+  const winner = pick(danger ? [...bias, "flee", "warn others", "flee", "investigate"] : bias);
   const probs = softmaxNoise([...SWARM_ACTIONS], winner, 1.8 + Math.random());
   const inputTokens = Math.round(40 + Math.random() * 60);
   return { action: winner, confidence: probs[winner]!, latencyMs: simJevLatency(), inputTokens, costUsd: inputTokens * (0.042 / 1_000_000) };
@@ -484,6 +504,7 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T, i: number) => P
 
 class Session {
   private abort = new AbortController();
+  private activeScene: SceneId = "router";
   private routerRunning = false;
   private routerPerSec = 3;
   private routerId = 0;
@@ -516,6 +537,7 @@ class Session {
     try { msg = JSON.parse(raw); } catch { return; }
     switch (msg.type) {
       case "scene":
+        this.activeScene = msg.scene;
         if (msg.scene === "router") this.startRouter();
         else if (msg.scene === "reflex") this.startStacker();
         else this.reset();
@@ -563,11 +585,13 @@ class Session {
       });
     } catch (e) {
       this.send({ type: "error", message: (e as Error).message });
+      await sleep(500, signal); // back off on a persistent error instead of retrying at stream cadence
     }
   }
 
   /** User-injected task — routed immediately, even while the auto-stream is paused. */
   private routeOne(text: string) {
+    if (this.activeScene !== "router") return; // don't fire a billed call for an off-scene inject
     void this.routeTask(makeCustomTask(text), this.abort.signal);
   }
 
