@@ -63,23 +63,41 @@ export interface GauntletResult {
   llm: GauntletSide;
 }
 
-/** Reflex: Jev pilots a craft through scrolling gates — one decision per tick. */
-export interface ReflexGate {
-  id: number;
-  /** rows ahead of the craft (0 = at the craft line). */
-  dist: number;
-  /** lanes this gate blocks. */
-  blocked: number[];
-}
-export interface ReflexFrame {
-  lanes: number;
-  craft: number;
-  gates: ReflexGate[];
-  choice: string; // "left" | "stay" | "right"
+/**
+ * Stacker: Jev plays Tetris. One `choice` per piece over every legal placement;
+ * the server locks the winner and streams the resulting board (scene id stays "reflex").
+ */
+export interface StackerFrame {
+  cols: number;
+  rows: number;
+  /** rows*cols, row-major, 0 = empty else piece color id 1..7. Snapshot BEFORE line clears. */
+  board: number[];
+  /** flat indices the just-placed piece occupies (for the drop + flash). */
+  placed: number[];
+  /** row indices that are full in `board` and about to clear (flash, then collapse next frame). */
+  clearedRows: number[];
+  /** color id of the piece that was just placed. */
+  piece: number;
+  /** color id of the piece coming next (preview). */
+  next: number;
+  /** chosen placement key `${rot}_${col}`. */
+  choice: string;
+  /** short human summary of why, e.g. "clears 2 · holes 0 · top 5". */
+  reason: string;
+  /** probability of the winning option (diluted across many near-equal options). */
   confidence: number;
-  distance: number;
-  crashes: number;
-  crashed: boolean;
+  /** lead of the winning option over the runner-up — how decisive the pick was. */
+  margin: number;
+  /** how many placements Jev chose among (after pruning self-destructive moves). */
+  options: number;
+  /** total lines cleared this game. */
+  lines: number;
+  /** total pieces placed this game. */
+  pieces: number;
+  maxHeight: number;
+  holes: number;
+  /** no legal placement remained — board topped out; server auto-resets after this frame. */
+  gameOver: boolean;
   latencyMs: number;
   live: boolean;
 }
@@ -120,7 +138,7 @@ export type ServerMsg =
   | { type: "swarm.done" }
   | { type: "gauntlet.result"; r: GauntletResult }
   | { type: "gauntlet.done" }
-  | { type: "reflex.frame"; f: ReflexFrame }
+  | { type: "reflex.frame"; f: StackerFrame }
   | { type: "reload" }
   | { type: "error"; message: string };
 

@@ -1,9 +1,10 @@
 /**
  * Jev Dojo live demo server.
  *
- * Serves the canvas client and drives three scenes with REAL Jev calls over a
- * WebSocket. With no OPENROUTER_API_KEY it runs in SIM mode (clearly badged) so the
- * graphics are watchable and I can verify them; with a key it goes LIVE · Jev 1.13.
+ * Serves the canvas client and drives four scenes with REAL Jev calls over a
+ * WebSocket (Router · Stacker · Swarm · Gauntlet). With no key it runs in SIM mode
+ * (clearly badged) so the graphics are watchable and I can verify them; with a key it
+ * goes LIVE. The Stacker scene is Jev playing Tetris — one typed choice per piece.
  */
 import http from "node:http";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
@@ -19,12 +20,25 @@ import type {
   ClientMsg,
   GauntletResult,
   Health,
-  ReflexFrame,
+  StackerFrame,
   RouterDecision,
   ServerMsg,
   SwarmAgentInit,
   TxEntry,
 } from "../shared/protocol";
+import {
+  STACKER_ROWS,
+  STACKER_COLS,
+  PIECE_NAMES,
+  emptyGrid,
+  lockPiece,
+  placementsFor,
+  gridStats,
+  sevenBag,
+  type Grid,
+  type PieceId,
+  type Placement,
+} from "./stacker";
 
 const TYPESAFE_API_KEY = process.env.TYPESAFE_API_KEY?.trim() || "";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY?.trim() || "";
@@ -143,15 +157,6 @@ const gauntletQuestions = {
     sales: "Pricing, plans, demos, pre-purchase questions",
     spam: "Scam, phishing, or junk not from a real customer",
   }),
-};
-
-const REFLEX_LANES = 5;
-const REFLEX_VIEW = 7; // gates spawn this many rows ahead
-const reflexQuestion = {
-  steer: choice(
-    "You pilot a craft along fixed lanes. Ahead are gates that block some lanes. Steer so you are in a CLEAR lane when the nearest gate reaches you. Which way?",
-    { left: "move one lane left", stay: "keep the current lane", right: "move one lane right" },
-  ),
 };
 
 // --- helpers ----------------------------------------------------------------
@@ -276,66 +281,89 @@ async function jevClassify(text: string, truth: string): Promise<{ answer: strin
   return { answer, latencyMs: simJevLatency(), costUsd: inputTokens * (0.042 / 1_000_000), inputTokens };
 }
 
-// --- reflex sim (a self-generating real-time environment) -------------------
+// --- stacker: Jev plays Tetris (a self-generating real-time environment) ----
 
-interface ReflexState { craft: number; gates: { id: number; dist: number; blocked: number[] }[]; distance: number; crashes: number; nextId: number; }
+interface StackerState { grid: Grid; queue: PieceId[]; current: PieceId; next: PieceId; lines: number; pieces: number; }
 
-function spawnGate(s: ReflexState, dist: number) {
-  const nBlock = 1 + Math.floor(Math.random() * 3); // block 1..3 of 5 lanes → always ≥2 clear
-  const pool = [0, 1, 2, 3, 4];
-  const blocked: number[] = [];
-  for (let i = 0; i < nBlock; i++) blocked.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]!);
-  s.gates.push({ id: s.nextId++, dist, blocked: blocked.sort((a, b) => a - b) });
+function refillBag(s: StackerState) {
+  while (s.queue.length < 8) s.queue.push(...sevenBag());
 }
-function newReflexState(): ReflexState {
-  const s: ReflexState = { craft: 2, gates: [], distance: 0, crashes: 0, nextId: 0 };
-  spawnGate(s, 4); spawnGate(s, 7);
-  return s;
+function newStackerState(): StackerState {
+  const queue = [...sevenBag(), ...sevenBag()];
+  const current = queue.shift()!;
+  return { grid: emptyGrid(), queue, current, next: queue[0]!, lines: 0, pieces: 0 };
 }
-const clearLanes = (blocked: number[]) => [0, 1, 2, 3, 4].filter((l) => !blocked.includes(l));
-function reflexStateForJev(s: ReflexState) {
-  const g = [...s.gates].sort((a, b) => a.dist - b.dist);
-  const g0 = g[0], g1 = g[1];
-  return {
-    craft_lane: s.craft,
-    total_lanes: REFLEX_LANES,
-    next_gate: g0 ? { distance: Math.round(g0.dist), blocked_lanes: g0.blocked, clear_lanes: clearLanes(g0.blocked) } : null,
-    following_gate: g1 ? { distance: Math.round(g1.dist), blocked_lanes: g1.blocked, clear_lanes: clearLanes(g1.blocked) } : null,
-  };
+/** Cap how many placements we ask Jev to weigh (Tetris tops out ~34; choice allows 255). */
+const STACKER_MAX_OPTIONS = 40;
+/** Resulting-board summary — for the viewer readout + ledger. */
+const summarize = (p: Placement) => `clears ${p.lines} · holes ${p.holes} · top ${p.maxHeight} · bumps ${p.bumpiness}`;
+/**
+ * What Jev sees per option — the DELTA that actually decides the move. Total board holes
+ * (16 vs 18) reads the same across a messy board; "+2 holes" vs "+0 holes" is a sharp,
+ * legible signal Jev can act on so it keeps the stack clean early instead of spiraling.
+ */
+const describeOption = (p: Placement, baseHoles: number) => {
+  const dh = p.holes - baseHoles;
+  return `clears ${p.lines} · ${dh >= 0 ? "+" : ""}${dh} holes · top ${p.maxHeight} · bump ${p.bumpiness}`;
+};
+
+/** How many strong candidates Jev judges among (after pruning). Smaller = crisper confidence. */
+const STACKER_SHORTLIST = 10;
+
+interface Decision { placement: Placement; confidence: number; margin: number; options: number; latencyMs: number; inputTokens: number; costUsd: number; }
+
+/**
+ * Build Jev's candidate pool: prune self-destructive moves, then shortlist the strongest.
+ *   1) never offer a hole-burying move when a clean one exists (stops the death spiral),
+ *   2) keep the top STACKER_SHORTLIST by El-Tetris score, presented in NATURAL board order
+ *      (a strong candidate set, but we don't nudge which one Jev picks).
+ * This is candidate-generation + Jev-as-judge — how you'd actually deploy a fast typed model.
+ */
+function candidatePool(placements: Placement[], baseHoles: number): Placement[] {
+  const capped = placements.length > STACKER_MAX_OPTIONS
+    ? [...placements].sort((a, b) => b.score - a.score).slice(0, STACKER_MAX_OPTIONS)
+    : placements;
+  const bestCleanLines = Math.max(0, ...capped.filter((p) => p.holes <= baseHoles).map((p) => p.lines));
+  let clean = capped.filter((p) => p.holes <= baseHoles || p.lines > bestCleanLines);
+  if (clean.length === 0) clean = capped; // forced: every move buries a hole
+  const keep = new Set([...clean].sort((a, b) => b.score - a.score).slice(0, STACKER_SHORTLIST).map((p) => p.key));
+  return clean.filter((p) => keep.has(p.key));
 }
-/** Apply a steer, advance the world one tick, and report whether the craft crashed. */
-function reflexStep(s: ReflexState, choice: string): boolean {
-  if (choice === "left") s.craft = Math.max(0, s.craft - 1);
-  else if (choice === "right") s.craft = Math.min(REFLEX_LANES - 1, s.craft + 1);
-  for (const g of s.gates) g.dist -= 1;
-  let crashed = false;
-  for (const g of s.gates) if (g.dist <= 0 && g.blocked.includes(s.craft)) crashed = true;
-  s.gates = s.gates.filter((g) => g.dist > 0);
-  while (s.gates.length < 3) {
-    const maxDist = s.gates.length ? Math.max(...s.gates.map((g) => g.dist)) : 0;
-    spawnGate(s, Math.max(REFLEX_VIEW, maxDist + 3));
-  }
-  if (crashed) s.crashes++; else s.distance++;
-  return crashed;
-}
-async function reflexDecide(s: ReflexState): Promise<{ choice: string; confidence: number; latencyMs: number; inputTokens: number; costUsd: number }> {
+
+/** Pick a placement: Jev via one typed choice, or the El-Tetris heuristic in SIM. */
+async function stackerDecide(s: StackerState, placements: Placement[]): Promise<Decision> {
+  const base = gridStats(s.grid);
+  const pool = candidatePool(placements, base.holes);
+  const byKey = new Map(pool.map((p) => [p.key, p]));
+
   if (jev) {
+    const criteria: Record<string, string> = {};
+    for (const p of pool) criteria[p.key] = describeOption(p, base.holes);
+    const q = {
+      place: choice(
+        `Tetris — place the ${PIECE_NAMES[s.current]} piece (next: ${PIECE_NAMES[s.next]}). The stack tops out at height ${base.maxHeight}/${STACKER_ROWS} with ${base.holes} buried holes. Each option is a legal drop, described by its effect: lines it clears now, NEW holes it buries ("+0" is clean), the resulting top height, and bumpiness (surface roughness — lower is flatter). Choose in strict priority order: (1) clear lines when you can, (2) keep the top height LOW, (3) keep the surface FLAT (low bumpiness), (4) prefer edges/walls over the middle. Which single placement is best?`,
+        criteria,
+      ),
+    };
     const t0 = performance.now();
-    const res = await jev.systemOne({ state: reflexStateForJev(s), questions: reflexQuestion });
-    return { choice: res.answers.steer.choice, confidence: res.answers.steer.confidence, latencyMs: performance.now() - t0, inputTokens: res.usage.input_tokens, costUsd: estimateCostUSD(res.usage) };
+    const res = await jev.systemOne({ state: { piece: PIECE_NAMES[s.current], next: PIECE_NAMES[s.next], top_height: base.maxHeight, buried_holes: base.holes }, questions: q });
+    // Only used if Jev echoes an unparseable key — fall back to the best move, not the leftmost.
+    const placement = byKey.get(res.answers.place.choice) ?? [...pool].sort((a, b) => b.score - a.score)[0]!;
+    const ps = Object.values(res.answers.place.probabilities).sort((a, b) => b - a);
+    const margin = Math.max(0, (ps[0] ?? res.answers.place.confidence) - (ps[1] ?? 0));
+    return { placement, confidence: res.answers.place.confidence, margin, options: pool.length, latencyMs: performance.now() - t0, inputTokens: res.usage.input_tokens, costUsd: estimateCostUSD(res.usage) };
   }
-  // sim: head toward the nearest clear lane of the imminent gate (with an occasional slip)
-  const g = [...s.gates].sort((a, b) => a.dist - b.dist)[0];
-  let target = s.craft;
-  if (g) {
-    const clear = clearLanes(g.blocked);
-    target = clear.reduce((best, l) => (Math.abs(l - s.craft) < Math.abs(best - s.craft) ? l : best), clear[0] ?? s.craft);
-  }
-  let choice = target < s.craft ? "left" : target > s.craft ? "right" : "stay";
-  if (Math.random() < 0.08) choice = pick(["left", "stay", "right"]); // honest imperfection → real crashes
-  const inputTokens = Math.round(70 + Math.random() * 45);
-  return { choice, confidence: 0.6 + Math.random() * 0.39, latencyMs: simJevLatency(), inputTokens, costUsd: inputTokens * (0.042 / 1_000_000) };
+
+  // SIM: max El-Tetris score, with a rare slip among the top few so it isn't robotic.
+  const ranked = [...pool].sort((a, b) => b.score - a.score);
+  const placement = Math.random() < 0.05 ? pick(ranked.slice(0, Math.min(3, ranked.length))) : ranked[0]!;
+  const gap = ranked.length > 1 ? placement.score - ranked[1]!.score : 1;
+  const confidence = clamp01(0.62 + Math.tanh(Math.abs(gap) * 0.35) * 0.37);
+  const margin = clamp01(0.04 + Math.tanh(Math.abs(gap)) * 0.6);
+  const inputTokens = Math.round(120 + pool.length * 12);
+  return { placement, confidence, margin, options: pool.length, latencyMs: simJevLatency(), inputTokens, costUsd: inputTokens * (0.042 / 1_000_000) };
 }
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
 async function mapLimit<T>(items: T[], limit: number, fn: (t: T, i: number) => Promise<void>, signal: AbortSignal): Promise<void> {
   let i = 0;
@@ -354,9 +382,10 @@ class Session {
   private abort = new AbortController();
   private routerRunning = false;
   private routerPerSec = 3;
-  private reflexRunning = false;
-  private reflexPerSec = 4;
-  private reflex: ReflexState = newReflexState();
+  private stackerRunning = false;
+  private stackerPerSec = 3;
+  private stacker: StackerState = newStackerState();
+  private stackerOver = false;
   private txId = 0;
   constructor(private ws: WebSocket) {
     this.send({ type: "health", health: HEALTH });
@@ -383,13 +412,17 @@ class Session {
     switch (msg.type) {
       case "scene":
         if (msg.scene === "router") this.startRouter();
-        else if (msg.scene === "reflex") this.startReflex();
+        else if (msg.scene === "reflex") this.startStacker();
         else this.reset();
         break;
       case "router.run": this.routerRunning = msg.on; break;
       case "router.rate": this.routerPerSec = Math.max(1, Math.min(10, msg.perSec)); break;
-      case "reflex.run": this.reflexRunning = msg.on; break;
-      case "reflex.rate": this.reflexPerSec = Math.max(1, Math.min(10, msg.perSec)); break;
+      case "reflex.run":
+        // pressing Start after a top-out begins a fresh game
+        if (msg.on && this.stackerOver) { this.stacker = newStackerState(); this.stackerOver = false; }
+        this.stackerRunning = msg.on;
+        break;
+      case "reflex.rate": this.stackerPerSec = Math.max(1, Math.min(10, msg.perSec)); break;
       case "swarm.broadcast": this.runSwarm(msg.event, msg.count); break;
       case "gauntlet.start": this.runGauntlet(msg.count); break;
     }
@@ -422,37 +455,66 @@ class Session {
     }
   }
 
-  private async startReflex() {
+  private async startStacker() {
     const signal = this.reset();
-    this.reflexRunning = false; // start PAUSED — no calls until Start
-    this.reflex = newReflexState();
+    this.stackerRunning = false; // start PAUSED — no calls until Start
+    this.stackerOver = false;
+    this.stacker = newStackerState();
     while (!signal.aborted) {
-      if (!this.reflexRunning) { await sleep(100, signal); continue; }
+      if (!this.stackerRunning) { await sleep(100, signal); continue; }
+      const s = this.stacker;
       try {
-        const view = reflexStateForJev(this.reflex);
-        const d = await reflexDecide(this.reflex);
+        const placements = placementsFor(s.grid, s.current);
+        if (placements.length === 0) {
+          // topped out — show the final board and STOP; the user presses Start for a new game
+          this.sendStackerFrame({ placed: [], clearedRows: [], reason: "no legal move", choice: "-", confidence: 0, margin: 0, options: 0, latencyMs: 0, gameOver: true, board: s.grid.slice() });
+          this.stackerRunning = false;
+          this.stackerOver = true;
+          continue;
+        }
+        const placedPiece = s.current;
+        const d = await stackerDecide(s, placements);
         if (signal.aborted) return;
-        const crashed = reflexStep(this.reflex, d.choice);
-        const f: ReflexFrame = {
-          lanes: REFLEX_LANES, craft: this.reflex.craft,
-          gates: this.reflex.gates.map((g) => ({ id: g.id, dist: g.dist, blocked: g.blocked })),
-          choice: d.choice, confidence: d.confidence,
-          distance: this.reflex.distance, crashes: this.reflex.crashes, crashed,
-          latencyMs: d.latencyMs, live: MODE === "live",
-        };
-        this.send({ type: "reflex.frame", f });
+        const { snapshot, collapsed, full, cells } = lockPiece(s.grid, placedPiece, d.placement.rot, d.placement.col);
+        s.grid = collapsed;
+        s.lines += full.length;
+        s.pieces += 1;
+        // advance the bag — the new current becomes the preview shown this frame
+        refillBag(s);
+        s.current = s.queue.shift()!;
+        s.next = s.queue[0]!;
+        const reason = summarize(d.placement);
+        this.sendStackerFrame({ piece: placedPiece, next: s.current, placed: cells, clearedRows: full, reason, choice: d.placement.key, confidence: d.confidence, margin: d.margin, options: d.options, latencyMs: d.latencyMs, gameOver: false, board: snapshot });
         this.tx({
-          scene: "reflex", transport: TRANSPORT, model: JEV_MODEL, kind: "steer",
-          input: `lane ${view.craft_lane}/${REFLEX_LANES} · next gate d${view.next_gate?.distance ?? "-"} blocks [${view.next_gate?.blocked_lanes.join(",") ?? ""}]`,
-          summary: `${d.choice.toUpperCase()} · conf ${Math.round(d.confidence * 100)}%${crashed ? " · 💥 CRASH" : ""}`,
+          scene: "reflex", transport: TRANSPORT, model: JEV_MODEL, kind: "place",
+          input: `${PIECE_NAMES[placedPiece]}-piece · ${placements.length} legal spots`,
+          summary: `${reason} · conf ${Math.round(d.confidence * 100)}%${full.length ? ` · 🧹 ${full.length} line${full.length > 1 ? "s" : ""}` : ""}`,
           inputTokens: d.inputTokens, costUsd: d.costUsd, latencyMs: d.latencyMs, live: MODE === "live",
         });
       } catch (e) {
         this.send({ type: "error", message: (e as Error).message });
         await sleep(500, signal);
       }
-      await sleep(Math.max(80, Math.round(1000 / this.reflexPerSec)), signal);
+      await sleep(Math.max(120, Math.round(1000 / this.stackerPerSec)), signal);
     }
+  }
+
+  /** Build + stream a Stacker frame from the current state plus the move-specific bits. */
+  private sendStackerFrame(m: {
+    board: number[]; placed: number[]; clearedRows: number[];
+    piece?: number; next?: number; choice: string; reason: string;
+    confidence: number; margin: number; options: number; latencyMs: number; gameOver: boolean;
+  }) {
+    const s = this.stacker;
+    const stats = gridStats(s.grid);
+    const f: StackerFrame = {
+      cols: STACKER_COLS, rows: STACKER_ROWS, board: m.board, placed: m.placed, clearedRows: m.clearedRows,
+      piece: m.piece ?? s.current, next: m.next ?? s.next, choice: m.choice, reason: m.reason,
+      confidence: m.confidence, margin: m.margin, options: m.options, lines: s.lines, pieces: s.pieces,
+      maxHeight: stats.maxHeight, holes: stats.holes, gameOver: m.gameOver,
+      latencyMs: m.latencyMs, live: MODE === "live",
+    };
+    this.send({ type: "reflex.frame", f });
   }
 
   private async runSwarm(event: string, count: number) {

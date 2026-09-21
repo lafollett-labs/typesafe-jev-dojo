@@ -1,6 +1,7 @@
 /**
- * Jev Dojo — live canvas client. Three scenes share one WebSocket and one <canvas>:
+ * Jev Dojo — live canvas client. Four scenes share one WebSocket and one <canvas>:
  *   Router   — tasks classified by Jev fly down neon lanes; low-confidence escalates.
+ *   Stacker  — Jev plays Tetris: one typed choice per piece over every legal placement.
  *   Swarm    — hundreds of agents react in parallel to one broadcast.
  *   Gauntlet — Jev vs Claude on labeled tasks, scored against ground truth (honest).
  */
@@ -8,7 +9,7 @@ import { ROUTER_LANES, SWARM_ACTIONS } from "../shared/protocol";
 import type {
   GauntletResult,
   Health,
-  ReflexFrame,
+  StackerFrame,
   RouterDecision,
   ServerMsg,
   SwarmAgentInit,
@@ -31,8 +32,15 @@ const ACTION_COLOR: Record<string, string> = {
   "carry on": "#6b7192", investigate: C.cyan, "join in": C.green, flee: C.red, "warn others": C.amber,
 };
 const OPUS_BASELINE = 0.012; // assumed $/task if everything went to Opus — the savings yardstick
-const REFLEX_LANES_C = 5;
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+/** Tetromino colors, indexed by piece id 1..7 (I O T S Z J L). */
+const PIECE_COLOR = ["", C.cyan, C.amber, C.violet, C.green, C.red, "#5b8cff", "#ff9f45"];
+/** Rotation-0 cells for the NEXT preview (client only needs the spawn shape). */
+const PIECE_CELLS: [number, number][][] = [
+  [], [[0, 0], [0, 1], [0, 2], [0, 3]], [[0, 0], [0, 1], [1, 0], [1, 1]],
+  [[0, 0], [0, 1], [0, 2], [1, 1]], [[0, 1], [0, 2], [1, 0], [1, 1]],
+  [[0, 0], [0, 1], [1, 1], [1, 2]], [[0, 0], [1, 0], [1, 1], [1, 2]], [[0, 2], [1, 0], [1, 1], [1, 2]],
+];
 
 // --- dom + canvas ----------------------------------------------------------
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
@@ -487,42 +495,54 @@ class GauntletScene implements Scene {
 }
 
 // ===========================================================================
-// REFLEX — Jev pilots a craft through scrolling gates, one decision per tick.
+// STACKER — Jev plays Tetris: one typed choice per piece over every legal placement.
 // ===========================================================================
-class ReflexScene implements Scene {
-  private f: ReflexFrame | null = null;
+const PIECE_NAME = ["", "I", "O", "T", "S", "Z", "J", "L"];
+const ST_ROWS = 16, ST_COLS = 10;
+class StackerScene implements Scene {
+  private f: StackerFrame | null = null;
   private running = false;
-  private craftLane = 2;
-  private gy = new Map<number, number>();
-  private flash = 0; private shake = 0;
-  private lat: number[] = []; private stamps: number[] = []; private total = 0;
-  private trail: { x: number; y: number; a: number }[] = [];
+  private drop: { set: Set<number>; color: number; t: number } | null = null;
+  private flashRows = new Map<number, number>(); // row -> alpha
+  private overFlash = 0;
+  private lat: number[] = []; private stamps: number[] = [];
+  private best = 0;
 
   private geom() {
-    const playW = Math.min(W * 0.5, 460);
-    const x0 = W / 2 - playW / 2;
-    return { playW, x0, laneW: playW / REFLEX_LANES_C, craftY: H * 0.82, topY: H * 0.14 };
+    const cols = this.f?.cols ?? ST_COLS, rows = this.f?.rows ?? ST_ROWS;
+    const topPad = 128, botPad = 92; // clear the HUD tiles above and the control dock below
+    const availH = Math.max(120, H - topPad - botPad);
+    const cell = Math.max(9, Math.floor(Math.min((W * 0.42) / cols, availH / rows)));
+    const boardW = cell * cols, boardH = cell * rows;
+    const x0 = Math.round(W * 0.38 - boardW / 2);
+    const y0 = Math.round(topPad + (availH - boardH) / 2);
+    return { cols, rows, cell, boardW, boardH, x0, y0 };
   }
-  private laneX(lane: number) { const g = this.geom(); return g.x0 + (lane + 0.5) * g.laneW; }
-  private distToY(dist: number) { const g = this.geom(); return g.craftY - (clamp(dist, 0, 9) / 9) * (g.craftY - g.topY); }
+  private drawCell(x: number, y: number, s: number, color: string, glowAmt: number, alpha = 1) {
+    ctx.globalAlpha = alpha;
+    glow(color, glowAmt, () => { rr(x + 1, y + 1, s - 2, s - 2, Math.min(4, s * 0.24)); ctx.fillStyle = color; ctx.fill(); });
+    ctx.globalAlpha = alpha * 0.22; ctx.fillStyle = "#fff"; rr(x + 2.5, y + 2.5, s - 5, (s - 5) * 0.42, 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
 
   resize() {}
   enter() {
-    this.f = null; this.running = false; this.craftLane = 2; this.gy.clear();
-    this.total = 0; this.lat = []; this.stamps = []; this.trail = [];
+    this.f = null; this.running = false; this.drop = null; this.flashRows.clear();
+    this.overFlash = 0; this.lat = []; this.stamps = []; this.best = 0;
     send({ type: "scene", scene: "reflex" });
     tiles([
-      { k: "distance", v: "0", color: C.jev },
-      { k: "crashes", v: "0", color: C.red },
-      { k: "decisions/s", v: "0" },
-      { k: "reflex", v: "—", sub: "ms", color: C.cyan },
+      { k: "lines", v: "0", color: C.jev },
+      { k: "pieces", v: "0" },
+      { k: "max height", v: "0", color: C.amber },
+      { k: "holes", v: "0", color: C.red },
+      { k: "think", v: "—", sub: "ms", color: C.cyan },
     ]);
     const panel = document.createElement("div");
     panel.className = "panel controls";
     panel.innerHTML = `
       <button class="btn" id="rx-toggle">▶ Start</button>
-      <label>speed <span id="rx-rn">4</span>/s</label>
-      <input type="range" id="rx-rate" min="1" max="10" step="1" value="4" />
+      <label>speed <span id="rx-rn">3</span>/s</label>
+      <input type="range" id="rx-rate" min="1" max="8" step="1" value="3" />
       <span class="chip" id="rx-status">paused · idle</span>`;
     dock.appendChild(panel);
     const t = $("#rx-toggle") as HTMLButtonElement;
@@ -531,86 +551,131 @@ class ReflexScene implements Scene {
       send({ type: "reflex.run", on: this.running });
       t.textContent = this.running ? "⏸ Pause" : "▶ Start";
       t.classList.toggle("ghost", this.running);
-      ($("#rx-status")).textContent = this.running ? "flying — live calls" : "paused · idle";
+      ($("#rx-status")).textContent = this.running ? "playing — live calls" : "paused · idle";
     };
     ($("#rx-rate") as HTMLInputElement).oninput = (e) => {
       const v = Number((e.target as HTMLInputElement).value);
       $("#rx-rn").textContent = String(v);
       send({ type: "reflex.rate", perSec: v });
     };
-    note.textContent = "Jev pilots the craft — one real decision per tick. It sees the gates ahead and steers for a clear lane. The environment generates its own endless data. Starts paused.";
+    note.textContent = "Jev plays Tetris. Every piece is ONE typed choice over every legal placement — each option described by the board it makes (lines · holes · height · bumps). No look-ahead search, just a fast typed decision. Starts paused.";
   }
   exit() { this.running = false; }
   message(m: ServerMsg) {
     if (m.type !== "reflex.frame") return;
-    this.f = m.f; this.total++; this.stamps.push(performance.now());
-    this.lat.push(m.f.latencyMs); if (this.lat.length > 30) this.lat.shift();
-    if (m.f.crashed) { this.flash = 1; this.shake = 1; }
-    const ids = new Set(m.f.gates.map((gg) => gg.id));
-    for (const k of [...this.gy.keys()]) if (!ids.has(k)) this.gy.delete(k);
+    const f = m.f; this.f = f;
+    this.stamps.push(performance.now());
+    if (!f.gameOver) { this.lat.push(f.latencyMs); if (this.lat.length > 30) this.lat.shift(); }
+    if (f.placed.length && !f.gameOver) this.drop = { set: new Set(f.placed), color: f.piece, t: 0 };
+    for (const r of f.clearedRows) this.flashRows.set(r, 1);
+    this.best = Math.max(this.best, f.lines);
+    if (f.gameOver) {
+      // the game stops on top-out; reflect that in the control so Start begins a fresh game
+      this.overFlash = 1; this.drop = null; this.running = false;
+      const t = document.querySelector<HTMLButtonElement>("#rx-toggle");
+      if (t) { t.textContent = "▶ Start"; t.classList.remove("ghost"); }
+      const st = document.querySelector<HTMLElement>("#rx-status");
+      if (st) st.textContent = "topped out · press start";
+    }
+  }
+  /** Right-side panel: NEXT preview + Jev's decision readout (clear of the HUD + dock). */
+  private drawPanel(g: { x0: number; y0: number; boardW: number; cell: number }, now: number) {
+    const f = this.f; if (!f) return;
+    const px = g.x0 + g.boardW + 28, s = Math.max(16, Math.round(g.cell * 0.7));
+    // NEXT preview
+    text("NEXT", px, g.y0 + 6, M(11), C.muted);
+    const cells = PIECE_CELLS[f.next] ?? [];
+    const by = g.y0 + 22;
+    ctx.strokeStyle = "rgba(255,255,255,0.08)"; rr(px - 6, by - 6, 4 * s + 12, 2.4 * s + 12, 8); ctx.stroke();
+    if (cells.length) {
+      const w = Math.max(...cells.map((c) => c[1])) + 1, h = Math.max(...cells.map((c) => c[0])) + 1;
+      const ox = px + ((4 - w) * s) / 2, oy = by + ((2.4 - h) * s) / 2;
+      const col = PIECE_COLOR[f.next] ?? C.muted;
+      for (const [r, c] of cells) this.drawCell(ox + c * s, oy + r * s, s, col, 6);
+    }
+    // decision readout
+    let ry = by + 2.4 * s + 30;
+    if (f.gameOver) {
+      text("GAME OVER", px, ry, M(10.5), C.red); ry += 22;
+      text("topped out", px, ry, D(16), C.red); ry += 26;
+      text(`cleared ${f.lines} lines · ${f.pieces} pieces`, px, ry, M(11.5), "#cfd3e6"); ry += 22;
+      text("press Start for a new game", px, ry, M(11.5), C.muted); ry += 20;
+      text(`best  ${this.best} lines`, px, ry, M(11.5), C.jev);
+      return;
+    }
+    const pcol = PIECE_COLOR[f.piece] ?? C.text;
+    text("JEV JUST PLACED", px, ry, M(10.5), C.muted); ry += 20;
+    text(`${PIECE_NAME[f.piece] ?? "?"}-piece`, px, ry, D(16), pcol); ry += 26;
+    text(f.reason, px, ry, M(11.5), "#cfd3e6"); ry += 22;
+    const pace = this.stamps.length;
+    text(`confidence ${Math.round(f.confidence * 100)}%  ·  +${Math.round(f.margin * 100)}% lead`, px, ry, M(11.5), C.jev); ry += 18;
+    text(`${f.options} moves judged  ·  pace ${pace}/s`, px, ry, M(11.5), C.muted); ry += 18;
+    text(`best  ${this.best} lines`, px, ry, M(11.5), C.muted);
   }
   frame(dt: number, now: number) {
     bgGrid();
     const g = this.geom();
-    this.shake = Math.max(0, this.shake - dt * 3);
-    ctx.save();
-    ctx.translate((Math.random() - 0.5) * this.shake * 10, 0);
-    for (let i = 0; i < REFLEX_LANES_C; i++) {
-      const x = this.laneX(i);
-      ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(x, g.topY); ctx.lineTo(x, g.craftY + 20); ctx.stroke();
-    }
-    ctx.strokeStyle = "rgba(255,46,151,0.25)"; ctx.beginPath(); ctx.moveTo(g.x0, g.craftY); ctx.lineTo(g.x0 + g.playW, g.craftY); ctx.stroke();
     const f = this.f;
+    // well frame + faint grid
+    ctx.strokeStyle = "rgba(255,255,255,0.10)"; ctx.lineWidth = 1.5;
+    rr(g.x0 - 4, g.y0 - 4, g.boardW + 8, g.boardH + 8, 10); ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.035)"; ctx.lineWidth = 1; ctx.beginPath();
+    for (let c = 1; c < g.cols; c++) { const x = g.x0 + c * g.cell; ctx.moveTo(x, g.y0); ctx.lineTo(x, g.y0 + g.boardH); }
+    for (let r = 1; r < g.rows; r++) { const y = g.y0 + r * g.cell; ctx.moveTo(g.x0, y); ctx.lineTo(g.x0 + g.boardW, y); }
+    ctx.stroke();
+
+    // advance the drop-in animation
+    if (this.drop) { this.drop.t = Math.min(1, this.drop.t + dt / 0.13); if (this.drop.t >= 1) this.drop = null; }
+    const dropping = this.drop;
+
     if (f) {
-      const nearest = f.gates.reduce((m, gg) => Math.min(m, gg.dist), Infinity);
-      for (const gate of f.gates) {
-        const ty = this.distToY(gate.dist);
-        let ry = this.gy.get(gate.id); if (ry === undefined) ry = ty - 24;
-        ry += (ty - ry) * Math.min(1, dt * 7); this.gy.set(gate.id, ry);
-        const near = gate.dist === nearest;
-        for (const lane of gate.blocked) {
-          const x = this.laneX(lane) - g.laneW / 2 + 3;
-          glow(C.red, near ? 14 : 3, () => { rr(x, ry! - 11, g.laneW - 6, 22, 5); ctx.fillStyle = near ? "rgba(251,92,108,0.92)" : "rgba(251,92,108,0.42)"; ctx.fill(); });
-        }
-        if (near) for (const lane of [0, 1, 2, 3, 4].filter((l) => !gate.blocked.includes(l))) {
-          const x = this.laneX(lane); ctx.strokeStyle = "rgba(52,211,154,0.55)"; ctx.lineWidth = 1.5;
-          rr(x - g.laneW / 2 + 4, ry! - 11, g.laneW - 8, 22, 5); ctx.stroke();
-        }
+      // settled cells (skip the ones currently dropping in — drawn separately below)
+      for (let i = 0; i < f.board.length; i++) {
+        const id = f.board[i]!; if (!id) continue;
+        if (dropping && dropping.set.has(i)) continue;
+        const r = Math.floor(i / g.cols), c = i % g.cols;
+        this.drawCell(g.x0 + c * g.cell, g.y0 + r * g.cell, g.cell, PIECE_COLOR[id] ?? C.muted, 5);
       }
-    }
-    const target = f ? f.craft : 2;
-    this.craftLane += (target - this.craftLane) * Math.min(1, dt * 9);
-    const cx = this.laneX(this.craftLane), cy = g.craftY;
-    if (!REDUCED && this.running) this.trail.push({ x: cx, y: cy + 8, a: 1 });
-    for (const p of this.trail) { p.a -= dt * 2; p.y += dt * 40; }
-    this.trail = this.trail.filter((p) => p.a > 0);
-    for (const p of this.trail) { ctx.globalAlpha = p.a * 0.5; ctx.fillStyle = C.jev; ctx.beginPath(); ctx.arc(p.x, p.y, 3 * p.a, 0, 7); ctx.fill(); }
-    ctx.globalAlpha = 1;
-    glow(C.jev, 18, () => { ctx.beginPath(); ctx.moveTo(cx, cy - 14); ctx.lineTo(cx - 11, cy + 12); ctx.lineTo(cx + 11, cy + 12); ctx.closePath(); ctx.fillStyle = "#ff2e97"; ctx.fill(); });
-    if (f) {
-      text(f.choice === "left" ? "◄" : f.choice === "right" ? "►" : "■", cx, cy + 34, D(16), C.jev, "center");
-      const g0 = [...f.gates].sort((a, b) => a.dist - b.dist)[0];
-      if (g0) {
-        const clear = [0, 1, 2, 3, 4].filter((l) => !g0.blocked.includes(l));
-        text(`NEXT GATE  d${g0.dist} · clear [${clear.join(",")}]  →  ${f.choice.toUpperCase()} ${Math.round(f.confidence * 100)}%`, W / 2, g.topY - 18, M(11.5), "#cfd3e6", "center");
+      // dropping piece: rigid fall from just above its resting place
+      if (dropping) {
+        const off = (1 - ease(dropping.t)) * g.cell * 7;
+        ctx.save(); rr(g.x0, g.y0, g.boardW, g.boardH, 8); ctx.clip();
+        for (const i of dropping.set) {
+          const r = Math.floor(i / g.cols), c = i % g.cols;
+          this.drawCell(g.x0 + c * g.cell, g.y0 + r * g.cell - off, g.cell, PIECE_COLOR[dropping.color] ?? C.muted, 12);
+        }
+        ctx.restore();
       }
+      // line-clear flash over full rows
+      for (const [r, a] of this.flashRows) {
+        ctx.globalAlpha = a; glow("#fff", 24 * a, () => { rr(g.x0, g.y0 + r * g.cell, g.boardW, g.cell, 3); ctx.fillStyle = "rgba(255,255,255,0.9)"; ctx.fill(); });
+        ctx.globalAlpha = 1;
+        const na = a - dt * 4; if (na <= 0) this.flashRows.delete(r); else this.flashRows.set(r, na);
+      }
+      this.drawPanel(g, now);
+    } else {
+      text("press start", g.x0 + g.boardW / 2, g.y0 + g.boardH / 2, D(18), C.muted, "center");
     }
-    ctx.restore();
-    if (this.flash > 0) {
-      ctx.fillStyle = `rgba(251,92,108,${this.flash * 0.28})`; ctx.fillRect(0, 0, W, H);
-      text("CRASH", W / 2, H * 0.4, D(40), `rgba(251,92,108,${this.flash})`, "center");
-      this.flash = Math.max(0, this.flash - dt * 1.6);
+
+    // game-over overlay
+    if (this.overFlash > 0 && f) {
+      ctx.fillStyle = `rgba(251,92,108,${this.overFlash * 0.22})`; ctx.fillRect(0, 0, W, H);
+      text("TOPPED OUT", g.x0 + g.boardW / 2, g.y0 + g.boardH * 0.42, D(30), `rgba(251,92,108,${this.overFlash})`, "center");
+      text(`${f.lines} lines · ${f.pieces} pieces — new game…`, g.x0 + g.boardW / 2, g.y0 + g.boardH * 0.42 + 30, M(12), `rgba(232,234,245,${this.overFlash})`, "center");
+      this.overFlash = Math.max(0, this.overFlash - dt * 0.8);
     }
+
     const cutoff = performance.now() - 1000; this.stamps = this.stamps.filter((s) => s > cutoff);
-    if (f) { setTile(0, String(f.distance)); setTile(1, String(f.crashes)); }
-    setTile(2, String(this.stamps.length));
-    setTile(3, this.lat.length ? String(Math.round(this.lat.reduce((a, b) => a + b, 0) / this.lat.length)) : "—");
+    if (f) {
+      setTile(0, String(f.lines)); setTile(1, String(f.pieces));
+      setTile(2, String(f.maxHeight)); setTile(3, String(f.holes));
+    }
+    setTile(4, this.lat.length ? String(Math.round(this.lat.reduce((a, b) => a + b, 0) / this.lat.length)) : "—");
   }
 }
 
 // --- scenes registry + tabs ------------------------------------------------
-const scenes: Record<string, Scene> = { router: new RouterScene(), reflex: new ReflexScene(), swarm: new SwarmScene(), gauntlet: new GauntletScene() };
+const scenes: Record<string, Scene> = { router: new RouterScene(), reflex: new StackerScene(), swarm: new SwarmScene(), gauntlet: new GauntletScene() };
 document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach((b) => {
   b.onclick = () => {
     document.querySelectorAll("#tabs button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
@@ -619,7 +684,7 @@ document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach((b) => {
 });
 
 // --- ledger (session totals + scrollable transaction history) --------------
-const SCENE_COLOR: Record<string, string> = { router: C.jev, swarm: C.violet, gauntlet: C.cyan };
+const SCENE_COLOR: Record<string, string> = { router: C.jev, reflex: C.amber, swarm: C.violet, gauntlet: C.cyan };
 const fmtTok = (n: number) => (n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "K" : String(Math.round(n)));
 const ledger = (() => {
   const list = $("#lg-list"), drawer = $("#ledger");
