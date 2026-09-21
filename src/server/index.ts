@@ -290,7 +290,8 @@ function guessLane(text: string): string {
   // finished artifact, or root-causing what a strong model already couldn't crack.
   if (/autonomous|multi-?hour|long-?horizon|overnight|over the weekend|end-to-end research|deep research|root.?cause.*(couldn|could not|fail|nobody|no one)|even opus|beyond opus|self-verif|days? of work/.test(t)) return "fable";
   // The Opus default for serious engineering: security review, architecture, debugging, refactors, migrations.
-  if (/security|vuln|exploit|privileg|escalat|inject|ssrf|idor|architect|design|shard|partition|replication|topology|debug|race condition|deadlock|memory leak|refactor|migrat|distributed|concurren|multi-?tenant|roll ?out|permission|scal/.test(t)) return "opus";
+  // `\bdesign\b` / `\bscale\b` (not bare "design"/"scal") so "redesign the CSV" or "rescale numbers" fall through to tool.
+  if (/security|vuln|exploit|privileg|escalat|inject|ssrf|idor|architect|\bdesign\b|shard|partition|replication|topology|debug|race condition|deadlock|memory leak|refactor|migrat|distributed|concurren|multi-?tenant|roll ?out|permission|scalab|scaling|\bscale\b/.test(t)) return "opus";
   // Standard engineering & writing → sonnet.
   if (/code|implement|endpoint|test|bug|fix|api|function|summar|draft|rewrite|translate|review|brainstorm|ideat|analy/.test(t)) return "sonnet";
   // Deterministic → tool.
@@ -320,7 +321,7 @@ function makeCustomTask(text: string): RouterTask {
  *     reformat is a coin-flip that costs nothing to get wrong — just take the top lane; don't
  *     burn a human on it. Only escalate a torn decision when the blast radius is real AND a human
  *     could actually add value. When the contest is between the two frontier tiers (opus vs fable),
- *     a human adds nothing — either pick is an excellent model — so we take the stronger, not REVIEW.
+ *     a human adds nothing — either pick is an excellent model — so we keep Jev's own pick, not REVIEW.
  */
 const FRONTIER_TIERS = new Set(["opus", "fable"]);
 function routeEscalated(laneProbs: Record<string, number>, confidence: number, needHuman: number, risk: number): boolean {
@@ -354,8 +355,11 @@ async function routerDecide(task: RouterTask, id: number): Promise<RouterDecisio
   const laneProbs = softmaxNoise(Object.keys(routerQuestions.route.criteria), task.lane, 2.2 + Math.random());
   const confidence = laneProbs[task.lane]!;
   // needHuman now means "too ambiguous to act on" — a property of the *task*, not its risk. Only the
-  // genuinely under-specified kinds (spam-or-real triage, vague support asks, free-typed) lean high.
-  const ambiguous = /classify|moderation|support|custom/.test(task.kind);
+  // genuinely under-specified kinds lean high: spam-or-real triage, vague support asks, and a free-typed
+  // task ONLY when guessLane couldn't classify it (fell through to the "haiku" default). A clearly-scoped
+  // custom task ("review this auth flow for IDOR") routes to its tier confidently — it isn't ambiguous.
+  const vagueCustom = task.kind === "custom" && task.lane === "haiku";
+  const ambiguous = vagueCustom || /classify|moderation|support/.test(task.kind);
   const needHuman = Math.min(1, Math.max(0, (ambiguous ? 0.72 : 0.15) + (Math.random() - 0.5) * 0.45));
   const risk = Math.max(0, Math.min(3, task.risk + (Math.random() - 0.5) * 0.5));
   return {
