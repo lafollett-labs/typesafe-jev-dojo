@@ -234,10 +234,11 @@ const gauntletQuestions = {
 const triageQuestions = {
   intent: choice("Primary intent of this support ticket", {
     billing: "Payments, invoices, refunds, charges",
-    technical: "Bugs, errors, product problems",
+    technical: "Bugs, errors, outages, product problems",
     sales: "Pricing, plans, upgrades, pre-sale questions",
     spam: "Junk / phishing / not a real customer",
     account: "Login, password, access, account management",
+    feedback: "Praise, feature requests, typos, general feedback",
   }),
   priority: score("How urgently should a human act on this", ["whenever", "this week", "today", "right now"]),
   sentiment: score("The customer's emotional tone", ["happy", "neutral", "annoyed", "furious"]),
@@ -262,6 +263,12 @@ const TRIAGE_TICKETS: string[] = [
   "Hi — really liking the product so far. We're a 40-person team evaluating the Business tier. Could we get a demo and a quote for annual billing? Also, does SSO come with that plan?",
   "Your SDK throws 'invalid_grant' on token refresh intermittently since v3.2 — about 5% of our calls fail and nothing changed on our side. This is starting to affect production. What's the fix?",
   "Bonjour, je n'arrive pas à réinitialiser mon mot de passe, le lien dans l'email a expiré à chaque fois. Pouvez-vous m'aider ? C'est assez urgent.",
+  "Just wanted to say your new dashboard is gorgeous — whoever designed it deserves a raise. Keep it up!",
+  "PRODUCTION DOWN. Your API has returned 503 on every call for the last 20 minutes and we are actively losing money. Please escalate NOW.",
+  "quick q: does the Team plan include SSO? we're evaluating for ~30 seats and would need a quote for annual billing.",
+  "Hey, no rush at all — just wondering if dark mode is anywhere on the roadmap? Loving the app either way.",
+  "I think I found a small typo on your pricing page: 'montly' should be 'monthly'. Minor thing, figured you'd want to know.",
+  "Cancel my subscription. Nothing works, support never replies, and I'm completely done with this product.",
 ];
 
 // --- helpers ----------------------------------------------------------------
@@ -573,7 +580,7 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T, i: number) => P
 const TRIAGE_PRICE = 0.042 / 1_000_000;
 
 function triageTone(key: string, type: TriageField["type"], num: number, choiceKey?: string): TriageField["tone"] {
-  if (type === "choice") return choiceKey === "spam" ? "bad" : choiceKey === "sales" ? "good" : "info";
+  if (type === "choice") return choiceKey === "spam" ? "bad" : (choiceKey === "sales" || choiceKey === "feedback") ? "good" : "info";
   if (type === "score") return num >= 0.66 ? "bad" : num >= 0.4 ? "warn" : "good"; // num is normalized 0..1
   const hi = num >= 0.5; // noul: num is the probability
   switch (key) {
@@ -607,27 +614,28 @@ function triageField(key: string, ans: Record<string, unknown>): TriageField {
 function simTriage(ticket: string): Record<string, Record<string, unknown>> {
   const t = ticket.toLowerCase();
   const spam = /bit\.ly|gift card|reward|verify your|claim now|congratulations|selected|suspend/.test(t);
-  const billing = /charg|refund|invoice|\bbill|payment|credit|price|pricing|\bplan|seat|quote/.test(t);
-  const sales = /demo|quote|evaluat|annual|tier|\bsso\b|volume|business tier/.test(t);
+  const feedback = /gorgeous|love the|loving|deserve|keep it up|no rush|roadmap|dark mode|typo|montly|feature request|wondering if/.test(t);
+  const technical = /error|bug|spins|invalid|throw|\bfail|\b503\b|\b500\b|export|sdk|token|refresh|\bdown\b|outage|\bapi\b/.test(t);
+  const billing = /charg|refund|invoice|\bbill|payment|credit|cancel|subscription/.test(t);
+  const sales = /demo|quote|evaluat|annual|tier|\bsso\b|volume|business|seats|pricing|\bplan\b/.test(t);
   const account = /password|reset|login|locked|mot de passe/.test(t);
-  const technical = /error|bug|spins|invalid|throw|\bfail|500|export|sdk|token|refresh/.test(t);
-  const intentKey = spam ? "spam" : billing ? "billing" : sales ? "sales" : account ? "account" : technical ? "technical" : "technical";
-  const urgent = /today|asap|urgent|\bnow\b|board meeting|production|help!|4 ?pm|24h/.test(t);
-  const angry = /cancel|furious|third|unacceptable|ridiculous|honestly|considering|help!/.test(t);
-  const cancel = /cancel|leaving|competitor|switch/.test(t);
+  const intentKey = spam ? "spam" : feedback ? "feedback" : technical ? "technical" : billing ? "billing" : sales ? "sales" : account ? "account" : "technical";
+  const urgent = /today|asap|urgent|\bnow\b|board meeting|production|help!|4 ?pm|24h|escalate/.test(t);
+  const angry = /cancel|furious|third|unacceptable|ridiculous|honestly|considering|help!|done with/.test(t);
+  const cancel = /cancel|leaving|competitor|switch|done with/.test(t);
   const english = !/bonjour|hola|merci|gracias|mot de passe|n'arrive|ayuda|c'est/.test(t);
   const upsell = /team plan|business|seats|volume|annual|demo|quote|\bsso\b|upgrade/.test(t);
   const rn = (b: boolean, hi = 0.9, lo = 0.08) => (b ? hi - Math.random() * 0.15 : lo + Math.random() * 0.12);
   const sc = (v: number) => ({ type: "score", score: Math.max(0, Math.min(3, v + (Math.random() - 0.5) * 0.3)), confidence: 0.82 });
   return {
     intent: { type: "choice", choice: intentKey, confidence: spam ? 0.97 : 0.8 },
-    priority: sc(urgent ? 2.6 : 1.0),
-    sentiment: sc(angry ? 2.5 : 0.8),
-    churn_risk: sc(cancel ? 2.6 : 0.5),
+    priority: sc(urgent ? 2.7 : feedback ? 0.4 : 1.2),
+    sentiment: sc(angry ? 2.5 : feedback ? 0.4 : 0.9),
+    churn_risk: sc(cancel ? 2.7 : 0.5),
     is_urgent: { type: "noul", noul: rn(urgent) },
     needs_refund: { type: "noul", noul: rn(/refund|charg|double|twice|overcharg/.test(t)) },
     is_spam: { type: "noul", noul: rn(spam, 0.96, 0.05) },
-    needs_human: { type: "noul", noul: rn(!spam, 0.9, 0.12) },
+    needs_human: { type: "noul", noul: rn(!spam && !feedback, 0.9, 0.12) },
     upsell: { type: "noul", noul: rn(upsell) },
     is_english: { type: "noul", noul: english ? 0.99 : 0.03 },
   };
@@ -709,7 +717,35 @@ class Session {
       case "swarm.broadcast": this.runSwarm(msg.event, msg.count); break;
       case "gauntlet.start": this.runGauntlet(msg.count); break;
       case "triage.run": this.runTriage(msg.ticket); break;
+      case "triage.queue": this.runTriageQueue(msg.count); break;
     }
+  }
+
+  /** The panel over N tickets, fanned out in parallel (caller-side) — a whole inbox at once. */
+  private async runTriageQueue(count: number) {
+    const signal = this.reset();
+    const n = Math.max(2, Math.min(count, TRIAGE_TICKETS.length));
+    const pool = [...TRIAGE_TICKETS];
+    for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [pool[i], pool[j]] = [pool[j]!, pool[i]!]; }
+    const chosen = pool.slice(0, n).map((ticket, id) => ({ id, ticket }));
+    this.send({ type: "triage.queue.start", count: n });
+    const t0 = performance.now();
+    const totals = { tokens: 0, cost: 0 };
+    await mapLimit(chosen, MODE === "live" ? 12 : 24, async (item) => {
+      if (MODE === "sim") await sleep(120 + Math.random() * 480, signal); // stagger the stream so SIM looks live
+      const r = await triageDecide(item.ticket);
+      if (signal.aborted) return;
+      totals.tokens += r.inputTokens; totals.cost += r.costUsd;
+      this.send({ type: "triage.item", id: item.id, r });
+    }, signal);
+    if (signal.aborted) return;
+    const wallMs = performance.now() - t0;
+    this.send({ type: "triage.queue.done", count: n, inputTokens: totals.tokens, costUsd: totals.cost, wallMs, live: MODE === "live" });
+    this.tx({
+      scene: "queue", transport: MODE === "live" ? TRANSPORT : "sim", model: JEV_MODEL, kind: "triage-queue", input: `${n} tickets`,
+      summary: `${n} tickets × ${TRIAGE_KEYS.length} questions = ${n * TRIAGE_KEYS.length} decisions · ${Math.round(wallMs)}ms wall`,
+      inputTokens: totals.tokens, costUsd: totals.cost, latencyMs: Math.round(wallMs), live: MODE === "live",
+    });
   }
 
   private async runTriage(ticket?: string) {

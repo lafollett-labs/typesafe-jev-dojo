@@ -3,7 +3,7 @@
  * One WebSocket per browser; client sends ClientMsg, server streams ServerMsg.
  */
 
-export type SceneId = "router" | "swarm" | "gauntlet" | "reflex" | "triage";
+export type SceneId = "router" | "swarm" | "gauntlet" | "reflex" | "triage" | "queue";
 
 export interface Health {
   mode: "live" | "sim";
@@ -114,7 +114,9 @@ export type ClientMsg =
   | { type: "reflex.rate"; perSec: number }
   | { type: "reflex.reset" }
   /** Triage: run the whole typed-question panel on one ticket in a single batched call. */
-  | { type: "triage.run"; ticket?: string };
+  | { type: "triage.run"; ticket?: string }
+  /** Triage queue: run the panel over N tickets, fanned out in parallel caller-side. */
+  | { type: "triage.queue"; count: number };
 
 /** One line in the transaction ledger — a single billed call. */
 export interface TxEntry {
@@ -145,6 +147,9 @@ export type ServerMsg =
   | { type: "gauntlet.done" }
   | { type: "reflex.frame"; f: StackerFrame }
   | { type: "triage.result"; r: TriageResult }
+  | { type: "triage.queue.start"; count: number }
+  | { type: "triage.item"; id: number; r: TriageResult }
+  | { type: "triage.queue.done"; count: number; inputTokens: number; costUsd: number; wallMs: number; live: boolean }
   | { type: "reload" }
   | { type: "error"; message: string };
 

@@ -29,13 +29,14 @@ locally so the graphics run and you can explore offline. Add a key (below) and i
 
 ## The scenes
 
-A Node server drives five real-time canvas scenes over a single WebSocket. The server holds
+A Node server drives six real-time canvas scenes over a single WebSocket. The server holds
 the keys and makes every decision call; the browser is a pure renderer.
 
 | Scene | What it shows |
 | - | - |
 | **Router** | An **endless, self-generating stream** of realistic tasks (or **type your own** and route it live, even while paused). Jev answers **3 typed questions** each — *which model tier* (choice) · *too ambiguous to act on?* (noul) · *operational blast radius* (score) — and routes each down a neon lane. Tiers climb `tool → haiku → sonnet → opus → **fable**`, matching Anthropic's own ladder (Fable 5.1 is the frontier, *above* Opus 5). The key idea follows Anthropic's routing rule: **serious work defaults to Opus** (a confident "complex systems engineering → Opus" is the *right* call), and only what genuinely **exceeds** Opus — long-horizon multi-hour autonomous runs, deep end-to-end research — reaches **Fable**. Separately, only **genuine uncertainty escalates to REVIEW** — Jev is torn between tiers, or flags the task as too under-specified to act on. Live throughput, latency, $-saved-vs-Opus, and a decision feed. **Start / Pause / Reset.** |
 | **Triage** | The **batching** showcase. One support ticket → a whole **panel of ~10 typed questions** — *intent* (choice) · *priority · sentiment · churn-risk* (score) · *urgent? · needs-refund? · spam? · needs-human? · upsell? · English?* (noul) — all answered in a **single batched Jev call**, in parallel. Every answer card fills at once under one readout (*N decisions · 1 request · ~450 ms*), with the token/cost contrast vs. asking one question at a time (the ticket is re-sent every sequential call). **Triage a sample or paste your own.** |
+| **Queue** | Triage at **inbox scale**. The same 10-question panel is fired over *N* tickets **in parallel** (caller-side fan-out — `state` is one item per call, so the caller parallelizes). Each row is one ticket's verdict; the list **auto-sorts by priority** as verdicts land — `PRODUCTION DOWN → P3.0` floats to the top, friendly feedback settles to `P0.0`, **spam sinks to the bottom** — with per-row churn %, and `HUMAN`/`REFUND` flags. A whole inbox triaged in ~one round-trip of wall-clock (e.g. **8 tickets × 10 questions = 80 typed decisions in ~600 ms**). **Run the queue** with a ticket-count slider. |
 | **Stacker** | **Jev plays Tetris.** Every piece is **one typed `choice`** over *every* legal placement (column × rotation), each option described by the board it produces — `clears N · +H holes · top M · bump B`. No look-ahead search — just a fast typed decision per piece. Real line clears; on top-out it stops and waits for Start. In SIM the pick uses a genetic-algorithm-tuned heuristic. **Starts paused.** |
 | **Swarm** | Broadcast one event; Jev fires **N decisions in parallel** for hundreds of agents — each reacting **in character** (a thief flees authority, a scholar investigates, a musician joins in). The crowd **self-sorts into concentric rings by decision** with a live **consensus** readout. |
 | **Gauntlet** | The honest scene: a **40-task labeled set** (with deliberately ambiguous cases) → **Jev vs. Claude**, scored against ground truth. Green/red per task, accuracy / latency / cost bars, **per-category accuracy**, and a **confusion matrix** showing exactly which categories Jev mixes up — the numbers the demos skip. |
@@ -46,7 +47,7 @@ the keys and makes every decision call; the browser is a pure renderer.
   **Start / Pause** button and a speed slider — nothing is billed until you press Start.
   Both have a **Reset** (wipe stats / board and start fresh); Router also lets you **type any
   task and route it live** on demand.
-- **Triage**, **Swarm**, and **Gauntlet** run only on their button press — nothing is billed until then.
+- **Triage**, **Queue**, **Swarm**, and **Gauntlet** run only on their button press — nothing is billed until then.
 - The **Ledger** (top-right counter) opens a live, scrollable log of every billed call —
   input, verdict, tokens, latency, cost — and is also appended to `logs/transactions.jsonl`.
 - Kill the server: **Ctrl-C** in its terminal (or `pkill -f "src/server/index.ts"`).

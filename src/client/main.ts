@@ -1,7 +1,8 @@
 /**
- * Jev Dojo — live canvas client. Five scenes share one WebSocket and one <canvas>:
+ * Jev Dojo — live canvas client. Six scenes share one WebSocket and one <canvas>:
  *   Router   — tasks classified by Jev fly down neon lanes; low-confidence escalates.
  *   Triage   — one ticket, a whole typed-question panel answered in ONE batched call.
+ *   Queue    — the same panel over N tickets in parallel, auto-sorted by priority.
  *   Stacker  — Jev plays Tetris: one typed choice per piece over every legal placement.
  *   Swarm    — hundreds of agents react in parallel to one broadcast.
  *   Gauntlet — Jev vs Claude on labeled tasks, scored against ground truth (honest).
@@ -98,6 +99,17 @@ function text(s: string, x: number, y: number, font: string, color: string, alig
 }
 const D = (s: number) => `600 ${s}px "Chakra Petch", sans-serif`;
 const M = (s: number) => `500 ${s}px "IBM Plex Mono", monospace`;
+/** Find a triage answer field by key. */
+const field = (r: TriageResult, key: string) => r.fields.find((f) => f.key === key);
+/** Draw a small rounded pill; returns its right edge x. */
+function pill(x: number, cy: number, label: string, color: string): number {
+  ctx.font = M(10.5);
+  const w = ctx.measureText(label).width + 16;
+  ctx.fillStyle = color + "22"; rr(x, cy - 9, w, 18, 5); ctx.fill();
+  ctx.strokeStyle = color + "66"; ctx.lineWidth = 1; rr(x, cy - 9, w, 18, 5); ctx.stroke();
+  text(label, x + 8, cy, M(10.5), color);
+  return x + w;
+}
 /** Greedy word-wrap for canvas text at a given font + max width. */
 function wrapLines(s: string, maxW: number, font: string): string[] {
   ctx.font = font;
@@ -908,8 +920,116 @@ class TriageScene implements Scene {
   }
 }
 
+// ===========================================================================
+// TRIAGE QUEUE — the same panel over N tickets, fanned out in parallel, auto-sorted.
+// ===========================================================================
+interface QueueRow { id: number; r: TriageResult; y: number; targetY: number; pop: number; }
+class TriageQueueScene implements Scene {
+  private items = new Map<number, QueueRow>();
+  private expected = 0;
+  private running = false;
+  private startedAt = 0;
+  private done: { wallMs: number; inputTokens: number; costUsd: number; live: boolean } | null = null;
+  private readonly rowH = 42;
+  private readonly top = 116;
+
+  resize() {}
+  enter() {
+    this.items.clear(); this.expected = 0; this.running = false; this.done = null;
+    hud.innerHTML = ""; // Queue draws its own stats on the canvas (no HUD tiles)
+    const panel = document.createElement("div"); panel.className = "panel controls";
+    panel.innerHTML = `
+      <button class="btn" id="tq-go">Run the queue ▸</button>
+      <label>tickets <span id="tq-n">8</span></label>
+      <input type="range" id="tq-count" min="4" max="12" step="1" value="8" />
+      <span class="chip" id="tq-status">idle</span>`;
+    dock.appendChild(panel);
+    ($("#tq-count") as HTMLInputElement).oninput = (e) => { $("#tq-n").textContent = (e.target as HTMLInputElement).value; };
+    ($("#tq-go") as HTMLButtonElement).onclick = () => {
+      this.items.clear(); this.done = null; this.running = true; this.startedAt = performance.now();
+      ($("#tq-status")).textContent = "fanning out in parallel…";
+      send({ type: "triage.queue", count: Number(($("#tq-count") as HTMLInputElement).value) });
+    };
+    note.textContent = "A whole support inbox at once: the same 10-question panel is fired over N tickets IN PARALLEL (caller-side fan-out). Each row is one ticket's verdict; the list auto-sorts by priority — critical floats to the top, spam sinks to the bottom.";
+    send({ type: "scene", scene: "queue" });
+  }
+  exit() {}
+  private sortVal(r: TriageResult): number {
+    const spam = field(r, "is_spam")?.level ?? 0;
+    const pri = field(r, "priority")?.level ?? 0;
+    return spam > 0.5 ? pri - 10 : pri; // spam sinks below every real ticket
+  }
+  private reflow() {
+    [...this.items.values()]
+      .sort((a, b) => this.sortVal(b.r) - this.sortVal(a.r))
+      .forEach((it, i) => { it.targetY = this.top + i * this.rowH; });
+  }
+  message(m: ServerMsg) {
+    if (m.type === "triage.queue.start") { this.items.clear(); this.expected = m.count; this.running = true; this.done = null; }
+    else if (m.type === "triage.item") {
+      const startY = this.top + this.items.size * this.rowH;
+      this.items.set(m.id, { id: m.id, r: m.r, y: startY, targetY: startY, pop: 1 });
+      this.reflow();
+    } else if (m.type === "triage.queue.done") {
+      this.running = false;
+      this.done = { wallMs: m.wallMs, inputTokens: m.inputTokens, costUsd: m.costUsd, live: m.live };
+      ($("#tq-status")).textContent = m.live ? "done · live" : "done · sim";
+    }
+  }
+  private row(it: QueueRow, x: number, w: number) {
+    const r = it.r, y = it.y, h = this.rowH - 8, cy = y + h / 2;
+    const pri = field(r, "priority"), spam = field(r, "is_spam"), intent = field(r, "intent");
+    const churn = field(r, "churn_risk"), human = field(r, "needs_human"), refund = field(r, "needs_refund");
+    const isSpam = (spam?.level ?? 0) > 0.5;
+    const accent = isSpam ? C.red : TONE_COLOR[pri?.tone ?? "info"] ?? C.cyan;
+    const flash = ease(clamp(it.pop, 0, 1));
+    ctx.globalAlpha = isSpam ? 0.5 : 1;
+    ctx.fillStyle = C.panel; rr(x, y, w, h, 9); ctx.fill();
+    if (flash > 0) { ctx.globalAlpha = 0.45 * flash; glow(accent, 16 * flash, () => { ctx.fillStyle = accent; rr(x, y, w, h, 9); ctx.fill(); }); ctx.globalAlpha = isSpam ? 0.5 : 1; }
+    ctx.fillStyle = accent; rr(x, y, 3, h, 2); ctx.fill();
+    const plabel = isSpam ? "SPAM" : "P" + (pri ? Number(pri.value).toFixed(1) : "0.0");
+    const after = pill(x + 14, cy, plabel, accent);
+    text((intent?.value ?? "").toUpperCase(), after + 12, cy, M(10.5), C.muted);
+    const tstart = after + 96;
+    let rx = x + w - 14;
+    const chip = (label: string, col: string) => { ctx.font = M(9.5); const cw = ctx.measureText(label).width + 12; rx -= cw; ctx.fillStyle = col + "22"; rr(rx, cy - 8, cw, 16, 5); ctx.fill(); text(label, rx + 6, cy, M(9.5), col); rx -= 8; };
+    if (!isSpam) {
+      if ((human?.level ?? 0) > 0.5) chip("HUMAN", C.amber);
+      if ((refund?.level ?? 0) > 0.5) chip("REFUND", C.cyan);
+      const ch = churn?.level ?? 0;
+      text(`churn ${Math.round(ch * 100)}%`, rx - 6, cy, M(9.5), ch > 0.6 ? C.red : ch > 0.35 ? C.amber : C.muted, "right");
+      rx -= 92;
+    }
+    const tw = Math.max(60, rx - tstart - 10);
+    const first = wrapLines(r.ticket.trim(), tw, M(12))[0] ?? "";
+    const truncated = first.length < r.ticket.trim().length ? first.replace(/\s+\S*$/, "") + "…" : first;
+    text(truncated, tstart, cy, M(12), isSpam ? C.muted : C.text);
+    ctx.globalAlpha = 1;
+  }
+  frame(dt: number, now: number) {
+    bgGrid();
+    text("TRIAGE QUEUE", 24, 38, D(18), "#fff");
+    text(this.running ? "fanning out in parallel…" : this.done ? "sorted by priority — spam sunk" : "press Run the queue", 232, 38, M(11), this.running ? C.amber : this.done ? C.green : C.muted);
+    const items = [...this.items.values()];
+    const recv = items.length;
+    const anyCount = recv ? items[0]!.r.count : 10;
+    const wall = this.done ? this.done.wallMs : this.running ? now - this.startedAt : 0;
+    const cost = this.done ? this.done.costUsd : items.reduce((s, it) => s + it.r.costUsd, 0);
+    const tps = this.done && this.done.wallMs > 0 ? `  ·  ${(recv / (this.done.wallMs / 1000)).toFixed(0)} tk/s` : "";
+    text(`${recv}${this.expected ? `/${this.expected}` : ""} tickets  ·  ${recv * anyCount} typed decisions  ·  ${Math.round(wall)}ms wall  ·  $${cost.toFixed(6)}${tps}`, 24, 70, M(13), C.cyan);
+    if (this.done) text("whole inbox fired in parallel — one round-trip of wall-clock, sorted by priority, spam sunk to the bottom", 24, 92, M(11), C.green);
+    else if (!recv && !this.running) text("Fire the 10-question panel over a whole inbox at once — sorted live by priority as verdicts land.", 24, 92, M(12), C.muted);
+    const x = 24, w = Math.min(W - 48, 1120);
+    for (const it of items) {
+      it.pop = Math.max(0, it.pop - dt * 2);
+      it.y += (it.targetY - it.y) * Math.min(1, dt * 10);
+      this.row(it, x, w);
+    }
+  }
+}
+
 // --- scenes registry + tabs ------------------------------------------------
-const scenes: Record<string, Scene> = { router: new RouterScene(), reflex: new StackerScene(), swarm: new SwarmScene(), gauntlet: new GauntletScene(), triage: new TriageScene() };
+const scenes: Record<string, Scene> = { router: new RouterScene(), reflex: new StackerScene(), swarm: new SwarmScene(), gauntlet: new GauntletScene(), triage: new TriageScene(), queue: new TriageQueueScene() };
 document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach((b) => {
   b.onclick = () => {
     document.querySelectorAll("#tabs button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
@@ -918,7 +1038,7 @@ document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach((b) => {
 });
 
 // --- ledger (session totals + scrollable transaction history) --------------
-const SCENE_COLOR: Record<string, string> = { router: C.jev, reflex: C.amber, swarm: C.violet, gauntlet: C.cyan, triage: C.green };
+const SCENE_COLOR: Record<string, string> = { router: C.jev, reflex: C.amber, swarm: C.violet, gauntlet: C.cyan, triage: C.green, queue: "#5eead4" };
 const fmtTok = (n: number) => (n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "K" : String(Math.round(n)));
 const ledger = (() => {
   const list = $("#lg-list"), drawer = $("#ledger");
@@ -963,9 +1083,9 @@ function connect() {
   };
   ws.onclose = () => { badge.dataset.mode = "sim"; badgeText.textContent = "reconnecting…"; setTimeout(connect, 1200); };
 }
-function currentScene(): "router" | "reflex" | "swarm" | "gauntlet" | "triage" {
+function currentScene(): "router" | "reflex" | "swarm" | "gauntlet" | "triage" | "queue" {
   const sel = document.querySelector('#tabs button[aria-selected="true"]') as HTMLButtonElement | null;
-  return (sel?.dataset.scene as "router" | "reflex" | "swarm" | "gauntlet" | "triage") ?? "router";
+  return (sel?.dataset.scene as "router" | "reflex" | "swarm" | "gauntlet" | "triage" | "queue") ?? "router";
 }
 function applyHealth(h: Health) {
   badge.dataset.mode = h.mode;
