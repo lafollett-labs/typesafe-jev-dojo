@@ -25,6 +25,8 @@ import type {
   RouterDecision,
   ServerMsg,
   SwarmAgentInit,
+  TriageField,
+  TriageResult,
   TxEntry,
 } from "../shared/protocol";
 import {
@@ -227,6 +229,40 @@ const gauntletQuestions = {
     spam: "Scam, phishing, or junk not from a real customer",
   }),
 };
+
+// Triage — one ticket, a whole panel of typed questions answered in ONE batched call.
+const triageQuestions = {
+  intent: choice("Primary intent of this support ticket", {
+    billing: "Payments, invoices, refunds, charges",
+    technical: "Bugs, errors, product problems",
+    sales: "Pricing, plans, upgrades, pre-sale questions",
+    spam: "Junk / phishing / not a real customer",
+    account: "Login, password, access, account management",
+  }),
+  priority: score("How urgently should a human act on this", ["whenever", "this week", "today", "right now"]),
+  sentiment: score("The customer's emotional tone", ["happy", "neutral", "annoyed", "furious"]),
+  churn_risk: score("Risk this customer churns or leaves", ["none", "low", "elevated", "high"]),
+  is_urgent: noul("The customer expects action today"),
+  needs_refund: noul("A refund or billing correction is warranted"),
+  is_spam: noul("This is spam or phishing, not a genuine customer"),
+  needs_human: noul("This needs a human agent, not an automated reply"),
+  upsell: noul("There is a genuine upsell or expansion opportunity"),
+  is_english: noul("The message is written in English"),
+};
+const TRIAGE_KEYS = Object.keys(triageQuestions);
+const TRIAGE_LABELS: Record<string, string> = {
+  intent: "Intent", priority: "Priority", sentiment: "Sentiment", churn_risk: "Churn risk",
+  is_urgent: "Urgent today", needs_refund: "Needs refund", is_spam: "Spam / phishing",
+  needs_human: "Needs human", upsell: "Upsell signal", is_english: "English",
+};
+const TRIAGE_TICKETS: string[] = [
+  "I've been charged twice for my Pro plan this month and the second charge put my account over its credit limit. This is the third billing mistake this year — I'm honestly considering cancelling. Can someone fix this TODAY? I'd also like to know if the Team plan gives volume pricing for 12 seats.",
+  "hey the export button just spins forever on the reports page since this morning. tried chrome and safari, same thing. we have a board meeting at 4 and need those numbers. help!",
+  "Congratulations! Your account was selected for a $500 reward. Verify your details at bit.ly/claim-now within 24h to avoid suspension.",
+  "Hi — really liking the product so far. We're a 40-person team evaluating the Business tier. Could we get a demo and a quote for annual billing? Also, does SSO come with that plan?",
+  "Your SDK throws 'invalid_grant' on token refresh intermittently since v3.2 — about 5% of our calls fail and nothing changed on our side. This is starting to affect production. What's the fix?",
+  "Bonjour, je n'arrive pas à réinitialiser mon mot de passe, le lien dans l'email a expiré à chaque fois. Pouvez-vous m'aider ? C'est assez urgent.",
+];
 
 // --- helpers ----------------------------------------------------------------
 
@@ -533,6 +569,90 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T, i: number) => P
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
 }
 
+// --- Triage: one batched call, a full typed panel over one ticket ------------
+const TRIAGE_PRICE = 0.042 / 1_000_000;
+
+function triageTone(key: string, type: TriageField["type"], num: number, choiceKey?: string): TriageField["tone"] {
+  if (type === "choice") return choiceKey === "spam" ? "bad" : choiceKey === "sales" ? "good" : "info";
+  if (type === "score") return num >= 0.66 ? "bad" : num >= 0.4 ? "warn" : "good"; // num is normalized 0..1
+  const hi = num >= 0.5; // noul: num is the probability
+  switch (key) {
+    case "is_spam": return hi ? "bad" : "good";
+    case "upsell": return hi ? "good" : "info";
+    case "needs_human": return hi ? "warn" : "good";
+    case "is_english": return "info";
+    default: return hi ? "warn" : "info";
+  }
+}
+
+function triageField(key: string, ans: Record<string, unknown>): TriageField {
+  const label = TRIAGE_LABELS[key] ?? key;
+  const q = (triageQuestions as Record<string, { type: string; criteria?: unknown }>)[key]!;
+  if (q.type === "choice") {
+    const choiceKey = String(ans.choice ?? "");
+    const level = Math.max(0, Math.min(1, Number(ans.confidence ?? 0)));
+    return { key, label, type: "choice", value: choiceKey, level, tone: triageTone(key, "choice", level, choiceKey) };
+  }
+  if (q.type === "score") {
+    const levels = Array.isArray(q.criteria) ? q.criteria.length : 4;
+    const s = Number(ans.score ?? 0);
+    const norm = levels > 1 ? Math.max(0, Math.min(1, s / (levels - 1))) : 0;
+    return { key, label, type: "score", value: s.toFixed(2), level: norm, tone: triageTone(key, "score", norm) };
+  }
+  const p = Math.max(0, Math.min(1, Number(ans.noul ?? 0)));
+  return { key, label, type: "noul", value: p.toFixed(2), level: p, tone: triageTone(key, "noul", p) };
+}
+
+/** SIM answers, same shape as a live response, inferred from ticket keywords. */
+function simTriage(ticket: string): Record<string, Record<string, unknown>> {
+  const t = ticket.toLowerCase();
+  const spam = /bit\.ly|gift card|reward|verify your|claim now|congratulations|selected|suspend/.test(t);
+  const billing = /charg|refund|invoice|\bbill|payment|credit|price|pricing|\bplan|seat|quote/.test(t);
+  const sales = /demo|quote|evaluat|annual|tier|\bsso\b|volume|business tier/.test(t);
+  const account = /password|reset|login|locked|mot de passe/.test(t);
+  const technical = /error|bug|spins|invalid|throw|\bfail|500|export|sdk|token|refresh/.test(t);
+  const intentKey = spam ? "spam" : billing ? "billing" : sales ? "sales" : account ? "account" : technical ? "technical" : "technical";
+  const urgent = /today|asap|urgent|\bnow\b|board meeting|production|help!|4 ?pm|24h/.test(t);
+  const angry = /cancel|furious|third|unacceptable|ridiculous|honestly|considering|help!/.test(t);
+  const cancel = /cancel|leaving|competitor|switch/.test(t);
+  const english = !/bonjour|hola|merci|gracias|mot de passe|n'arrive|ayuda|c'est/.test(t);
+  const upsell = /team plan|business|seats|volume|annual|demo|quote|\bsso\b|upgrade/.test(t);
+  const rn = (b: boolean, hi = 0.9, lo = 0.08) => (b ? hi - Math.random() * 0.15 : lo + Math.random() * 0.12);
+  const sc = (v: number) => ({ type: "score", score: Math.max(0, Math.min(3, v + (Math.random() - 0.5) * 0.3)), confidence: 0.82 });
+  return {
+    intent: { type: "choice", choice: intentKey, confidence: spam ? 0.97 : 0.8 },
+    priority: sc(urgent ? 2.6 : 1.0),
+    sentiment: sc(angry ? 2.5 : 0.8),
+    churn_risk: sc(cancel ? 2.6 : 0.5),
+    is_urgent: { type: "noul", noul: rn(urgent) },
+    needs_refund: { type: "noul", noul: rn(/refund|charg|double|twice|overcharg/.test(t)) },
+    is_spam: { type: "noul", noul: rn(spam, 0.96, 0.05) },
+    needs_human: { type: "noul", noul: rn(!spam, 0.9, 0.12) },
+    upsell: { type: "noul", noul: rn(upsell) },
+    is_english: { type: "noul", noul: english ? 0.99 : 0.03 },
+  };
+}
+
+async function triageDecide(ticket: string): Promise<TriageResult> {
+  const count = TRIAGE_KEYS.length;
+  const ticketTokens = Math.max(1, Math.round(ticket.length / 4)); // rough, for the sequential estimate
+  if (jev) {
+    const t0 = performance.now();
+    const res = await jev.systemOne({ state: ticket, questions: triageQuestions });
+    const latencyMs = performance.now() - t0;
+    const fields = TRIAGE_KEYS.map((k) => triageField(k, (res.answers as unknown as Record<string, Record<string, unknown>>)[k]!));
+    const inputTokens = res.usage.input_tokens;
+    const qTokens = Math.max(0, inputTokens - ticketTokens);   // the panel's questions (sent once when batched)
+    const seqInputTokens = count * ticketTokens + qTokens;     // sequential re-sends the ticket every call
+    return { ticket, fields, count, latencyMs, inputTokens, costUsd: estimateCostUSD(res.usage), seqInputTokens, seqCostUsd: seqInputTokens * TRIAGE_PRICE, live: true };
+  }
+  const ans = simTriage(ticket);
+  const fields = TRIAGE_KEYS.map((k) => triageField(k, ans[k]!));
+  const inputTokens = ticketTokens + count * 6;
+  const seqInputTokens = count * ticketTokens + count * 6;
+  return { ticket, fields, count, latencyMs: simJevLatency(), inputTokens, costUsd: inputTokens * TRIAGE_PRICE, seqInputTokens, seqCostUsd: seqInputTokens * TRIAGE_PRICE, live: false };
+}
+
 // --- per-connection session -------------------------------------------------
 
 class Session {
@@ -588,6 +708,24 @@ class Session {
       case "reflex.reset": this.startStacker(); break; // aborts the loop, new game, paused
       case "swarm.broadcast": this.runSwarm(msg.event, msg.count); break;
       case "gauntlet.start": this.runGauntlet(msg.count); break;
+      case "triage.run": this.runTriage(msg.ticket); break;
+    }
+  }
+
+  private async runTriage(ticket?: string) {
+    const signal = this.reset();
+    const text = (ticket?.trim() || pick(TRIAGE_TICKETS)).slice(0, 800);
+    try {
+      const r = await triageDecide(text);
+      if (signal.aborted) return;
+      this.send({ type: "triage.result", r });
+      this.tx({
+        scene: "triage", transport: r.live ? TRANSPORT : "sim", model: JEV_MODEL, kind: "triage", input: text,
+        summary: `${r.count} typed answers · 1 request · ${Math.round(r.latencyMs)}ms`,
+        inputTokens: r.inputTokens, costUsd: r.costUsd, latencyMs: r.latencyMs, live: r.live,
+      });
+    } catch (e) {
+      this.send({ type: "error", message: (e as Error).message });
     }
   }
 

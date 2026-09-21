@@ -29,12 +29,13 @@ locally so the graphics run and you can explore offline. Add a key (below) and i
 
 ## The scenes
 
-A Node server drives four real-time canvas scenes over a single WebSocket. The server holds
+A Node server drives five real-time canvas scenes over a single WebSocket. The server holds
 the keys and makes every decision call; the browser is a pure renderer.
 
 | Scene | What it shows |
 | - | - |
 | **Router** | An **endless, self-generating stream** of realistic tasks (or **type your own** and route it live, even while paused). Jev answers **3 typed questions** each — *which model tier* (choice) · *too ambiguous to act on?* (noul) · *operational blast radius* (score) — and routes each down a neon lane. Tiers climb `tool → haiku → sonnet → opus → **fable**`, matching Anthropic's own ladder (Fable 5.1 is the frontier, *above* Opus 5). The key idea follows Anthropic's routing rule: **serious work defaults to Opus** (a confident "complex systems engineering → Opus" is the *right* call), and only what genuinely **exceeds** Opus — long-horizon multi-hour autonomous runs, deep end-to-end research — reaches **Fable**. Separately, only **genuine uncertainty escalates to REVIEW** — Jev is torn between tiers, or flags the task as too under-specified to act on. Live throughput, latency, $-saved-vs-Opus, and a decision feed. **Start / Pause / Reset.** |
+| **Triage** | The **batching** showcase. One support ticket → a whole **panel of ~10 typed questions** — *intent* (choice) · *priority · sentiment · churn-risk* (score) · *urgent? · needs-refund? · spam? · needs-human? · upsell? · English?* (noul) — all answered in a **single batched Jev call**, in parallel. Every answer card fills at once under one readout (*N decisions · 1 request · ~450 ms*), with the token/cost contrast vs. asking one question at a time (the ticket is re-sent every sequential call). **Triage a sample or paste your own.** |
 | **Stacker** | **Jev plays Tetris.** Every piece is **one typed `choice`** over *every* legal placement (column × rotation), each option described by the board it produces — `clears N · +H holes · top M · bump B`. No look-ahead search — just a fast typed decision per piece. Real line clears; on top-out it stops and waits for Start. In SIM the pick uses a genetic-algorithm-tuned heuristic. **Starts paused.** |
 | **Swarm** | Broadcast one event; Jev fires **N decisions in parallel** for hundreds of agents — each reacting **in character** (a thief flees authority, a scholar investigates, a musician joins in). The crowd **self-sorts into concentric rings by decision** with a live **consensus** readout. |
 | **Gauntlet** | The honest scene: a **40-task labeled set** (with deliberately ambiguous cases) → **Jev vs. Claude**, scored against ground truth. Green/red per task, accuracy / latency / cost bars, **per-category accuracy**, and a **confusion matrix** showing exactly which categories Jev mixes up — the numbers the demos skip. |
@@ -45,7 +46,7 @@ the keys and makes every decision call; the browser is a pure renderer.
   **Start / Pause** button and a speed slider — nothing is billed until you press Start.
   Both have a **Reset** (wipe stats / board and start fresh); Router also lets you **type any
   task and route it live** on demand.
-- **Swarm** and **Gauntlet** run only on their button press.
+- **Triage**, **Swarm**, and **Gauntlet** run only on their button press — nothing is billed until then.
 - The **Ledger** (top-right counter) opens a live, scrollable log of every billed call —
   input, verdict, tokens, latency, cost — and is also appended to `logs/transactions.jsonl`.
 - Kill the server: **Ctrl-C** in its terminal (or `pkill -f "src/server/index.ts"`).
@@ -75,8 +76,14 @@ free. The Ledger's cost column reflects that. `.env` is git-ignored — keep you
 
 ```bash
 npm run smoke      # fire ONE real decision; print raw + typed answer + latency + cost
+npm run batch      # 10 typed questions batched (1 call) vs sequential (10 calls) — latency/token/cost
 npm run typecheck  # TypeScript 7, strict
 ```
+
+`npm run batch` demonstrates Jev's **batching**: a `questions` map is answered in a single
+request, in parallel. Because the state (the ticket) is sent once instead of once per question,
+a 10-question panel is typically **~4–5× faster and ~5× cheaper** than one call per question —
+the Triage scene visualizes exactly this.
 
 ## How the Stacker works
 
@@ -111,6 +118,7 @@ src/server/       Demo server: live Jev + Claude-subscription opponent, SIM fall
 src/server/stacker.ts   Pure Tetris engine (rotations, placements, line clear, heuristic scoring)
 src/client/       Canvas UI (index.html + main.ts, bundled on the fly by esbuild, hot-reload)
 src/smoke.ts      One-shot decision proof
+src/batch.ts      Batched vs sequential benchmark (the batching claim, measured)
 docs/             Verified API contract + research dossier
 ```
 

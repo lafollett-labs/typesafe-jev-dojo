@@ -28,6 +28,7 @@
   },
   "scripts": {
     "smoke": "node --env-file=.env --import tsx src/smoke.ts",
+    "batch": "node --env-file=.env --import tsx src/batch.ts",
     "demo": "node --env-file=.env --watch --import tsx src/server/index.ts",
     "typecheck": "tsc --noEmit"
   },

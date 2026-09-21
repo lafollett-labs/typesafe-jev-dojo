@@ -3,7 +3,7 @@
  * One WebSocket per browser; client sends ClientMsg, server streams ServerMsg.
  */
 
-export type SceneId = "router" | "swarm" | "gauntlet" | "reflex";
+export type SceneId = "router" | "swarm" | "gauntlet" | "reflex" | "triage";
 
 export interface Health {
   mode: "live" | "sim";
@@ -112,7 +112,9 @@ export type ClientMsg =
   | { type: "gauntlet.start"; count: number }
   | { type: "reflex.run"; on: boolean }
   | { type: "reflex.rate"; perSec: number }
-  | { type: "reflex.reset" };
+  | { type: "reflex.reset" }
+  /** Triage: run the whole typed-question panel on one ticket in a single batched call. */
+  | { type: "triage.run"; ticket?: string };
 
 /** One line in the transaction ledger — a single billed call. */
 export interface TxEntry {
@@ -142,8 +144,36 @@ export type ServerMsg =
   | { type: "gauntlet.result"; r: GauntletResult }
   | { type: "gauntlet.done" }
   | { type: "reflex.frame"; f: StackerFrame }
+  | { type: "triage.result"; r: TriageResult }
   | { type: "reload" }
   | { type: "error"; message: string };
+
+/** Triage: one ticket → many typed answers from ONE batched Jev call. */
+export interface TriageField {
+  key: string;
+  label: string;
+  type: "choice" | "noul" | "score";
+  /** display value: chosen key (choice), probability 0..1 (noul), or interpolated float (score). */
+  value: string;
+  /** 0..1 meter fill (choice confidence · noul probability · score / top-level). */
+  level: number;
+  /** semantic color bucket for the UI. */
+  tone: "good" | "warn" | "bad" | "info";
+}
+export interface TriageResult {
+  ticket: string;
+  /** one entry per typed question in the panel, all answered in the SAME request. */
+  fields: TriageField[];
+  count: number;
+  /** the single batched round-trip. */
+  latencyMs: number;
+  inputTokens: number;
+  costUsd: number;
+  /** estimated cost of the same panel run as `count` separate calls (the ticket re-sent each time). */
+  seqInputTokens: number;
+  seqCostUsd: number;
+  live: boolean;
+}
 
 /** Router lane targets, frontier→deterministic (Fable is the most capable tier, tool is no-LLM). */
 export const ROUTER_LANES = ["fable", "opus", "sonnet", "haiku", "tool"] as const;

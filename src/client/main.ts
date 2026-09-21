@@ -1,6 +1,7 @@
 /**
- * Jev Dojo — live canvas client. Four scenes share one WebSocket and one <canvas>:
+ * Jev Dojo — live canvas client. Five scenes share one WebSocket and one <canvas>:
  *   Router   — tasks classified by Jev fly down neon lanes; low-confidence escalates.
+ *   Triage   — one ticket, a whole typed-question panel answered in ONE batched call.
  *   Stacker  — Jev plays Tetris: one typed choice per piece over every legal placement.
  *   Swarm    — hundreds of agents react in parallel to one broadcast.
  *   Gauntlet — Jev vs Claude on labeled tasks, scored against ground truth (honest).
@@ -14,6 +15,8 @@ import type {
   ServerMsg,
   SwarmAgentInit,
   SwarmReaction,
+  TriageField,
+  TriageResult,
   TxEntry,
 } from "../shared/protocol";
 
@@ -31,6 +34,7 @@ const LANE_LABEL: Record<string, string> = {
 const ACTION_COLOR: Record<string, string> = {
   "carry on": "#6b7192", investigate: C.cyan, "join in": C.green, flee: C.red, "warn others": C.amber,
 };
+const TONE_COLOR: Record<string, string> = { good: C.green, warn: C.amber, bad: C.red, info: C.cyan };
 const OPUS_BASELINE = 0.012; // assumed $/task if everything went to Opus — the savings yardstick
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
 /** Tetromino colors, indexed by piece id 1..7 (I O T S Z J L). */
@@ -94,6 +98,19 @@ function text(s: string, x: number, y: number, font: string, color: string, alig
 }
 const D = (s: number) => `600 ${s}px "Chakra Petch", sans-serif`;
 const M = (s: number) => `500 ${s}px "IBM Plex Mono", monospace`;
+/** Greedy word-wrap for canvas text at a given font + max width. */
+function wrapLines(s: string, maxW: number, font: string): string[] {
+  ctx.font = font;
+  const lines: string[] = [];
+  let line = "";
+  for (const word of s.split(/\s+/)) {
+    const test = line ? line + " " + word : word;
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = word; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
 
 function tiles(items: { k: string; v: string; sub?: string; color?: string }[]) {
   hud.innerHTML = "";
@@ -775,8 +792,110 @@ class StackerScene implements Scene {
   }
 }
 
+// ===========================================================================
+// TRIAGE — one ticket, a whole typed-question panel answered in ONE batched call.
+// ===========================================================================
+class TriageScene implements Scene {
+  private r: TriageResult | null = null;
+  private shownAt = 0;
+  private running = false;
+
+  resize() {}
+  enter() {
+    tiles([
+      { k: "decisions", v: "0" },
+      { k: "requests", v: "1", color: C.jev },
+      { k: "latency", v: "—", color: C.cyan },
+      { k: "cost", v: "$0.00000" },
+      { k: "vs sequential", v: "—", color: C.green },
+    ]);
+    const p1 = document.createElement("div");
+    p1.className = "panel controls";
+    p1.innerHTML = `
+      <button class="btn" id="tr-go">Triage a ticket ▸</button>
+      <span class="chip" id="tr-status">idle</span>`;
+    const col = document.createElement("div");
+    col.style.cssText = "display:flex;flex-direction:column;gap:10px;max-width:70vw;";
+    col.appendChild(p1);
+    const inject = document.createElement("div");
+    inject.className = "panel controls";
+    inject.innerHTML = `
+      <label>your ticket</label>
+      <input type="text" id="tr-ticket" placeholder="paste a support message and triage it live…" style="min-width:280px" />
+      <button class="btn" id="tr-send">Triage ▸</button>`;
+    col.appendChild(inject);
+    dock.appendChild(col);
+    const start = (ticket?: string) => { this.running = true; ($("#tr-status")).textContent = "one batched call…"; send({ type: "triage.run", ticket }); };
+    ($("#tr-go") as HTMLButtonElement).onclick = () => start();
+    const input = $("#tr-ticket") as HTMLInputElement;
+    const sendTicket = () => start(input.value.trim() || undefined);
+    ($("#tr-send") as HTMLButtonElement).onclick = sendTicket;
+    input.onkeydown = (e) => { if (e.key === "Enter") sendTicket(); };
+    note.textContent = "One support ticket → a whole panel of typed questions (intent · priority · sentiment · churn · refund? · spam? · upsell? · language …) answered in ONE batched Jev call — all at once, one round-trip, versus a separate call per question.";
+    send({ type: "scene", scene: "triage" });
+  }
+  exit() {}
+  message(m: ServerMsg) {
+    if (m.type !== "triage.result") return;
+    this.r = m.r; this.shownAt = performance.now(); this.running = false;
+    ($("#tr-status")).textContent = m.r.live ? "batched · live" : "batched · sim";
+    setTile(0, String(m.r.count));
+    setTile(2, Math.round(m.r.latencyMs) + "ms");
+    setTile(3, "$" + m.r.costUsd.toFixed(6));
+    setTile(4, (m.r.seqInputTokens / Math.max(1, m.r.inputTokens)).toFixed(1) + "× fewer tok");
+  }
+  private card(f: TriageField, x: number, y: number, w: number, h: number, reveal: number) {
+    const e = ease(clamp(reveal, 0, 1));
+    if (e <= 0) return;
+    const col = TONE_COLOR[f.tone] ?? C.cyan;
+    ctx.globalAlpha = e;
+    ctx.fillStyle = C.panel; rr(x, y, w, h, 10); ctx.fill();
+    ctx.strokeStyle = col + "44"; ctx.lineWidth = 1; rr(x, y, w, h, 10); ctx.stroke();
+    text(f.label.toUpperCase(), x + 12, y + 15, M(9.5), C.muted);
+    const disp = f.type === "choice" ? f.value.toUpperCase() : f.type === "noul" ? Math.round(f.level * 100) + "%" : f.value;
+    glow(col, 6 * e, () => text(disp, x + 12, y + 35, D(18), col));
+    if (f.type === "choice") text(Math.round(f.level * 100) + "%", x + w - 12, y + 35, M(10), C.muted, "right");
+    const bx = x + 12, bw = w - 24, by = y + h - 12;
+    ctx.fillStyle = "rgba(255,255,255,0.07)"; rr(bx, by, bw, 5, 3); ctx.fill();
+    glow(col, 5 * e, () => { ctx.fillStyle = col; rr(bx, by, Math.max(3, bw * clamp(f.level, 0, 1) * e), 5, 3); ctx.fill(); });
+    ctx.globalAlpha = 1;
+  }
+  frame(_dt: number, now: number) {
+    bgGrid();
+    text("TRIAGE", 24, 40, D(18), "#fff");
+    text(this.running ? "batching…" : this.r ? "one call · one round-trip" : "press Triage a ticket", 150, 40, M(11), this.running ? C.amber : this.r ? C.green : C.muted);
+    if (!this.r) {
+      text("Ask Jev a whole panel of typed questions about one ticket — in a single request.", 24, 92, M(12.5), C.muted);
+      return;
+    }
+    const r = this.r;
+    const LW = clamp(W * 0.36, 260, 430);
+    const tx = 24, ty = 70;
+    const all = wrapLines(r.ticket, LW - 28, M(12.5));
+    const lines = all.length > 7 ? [...all.slice(0, 7), "…"] : all;
+    const theight = 30 + lines.length * 18 + 12;
+    ctx.fillStyle = C.panel; rr(tx, ty, LW, theight, 12); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1; rr(tx, ty, LW, theight, 12); ctx.stroke();
+    text("TICKET", tx + 14, ty + 16, M(9.5), C.muted);
+    lines.forEach((ln, i) => text(ln, tx + 14, ty + 34 + i * 18, M(12.5), C.text));
+    let my = ty + theight + 28;
+    glow(C.jev, 8, () => text(`${r.count} typed decisions`, tx, my, D(22), "#fff"));
+    my += 26; text(`1 request · ${Math.round(r.latencyMs)}ms · $${r.costUsd.toFixed(6)}`, tx, my, M(12.5), C.cyan);
+    my += 20; text(`one-by-one: ${r.count} requests · ${fmtTok(r.seqInputTokens)} tok · $${r.seqCostUsd.toFixed(6)}`, tx, my, M(11), C.muted);
+    my += 18; text(`→ batched sends the ticket once — ${(r.seqInputTokens / Math.max(1, r.inputTokens)).toFixed(1)}× fewer tokens`, tx, my, M(11), C.green);
+    const gx = tx + LW + 40, gw = W - gx - 24;
+    const cols = Math.max(1, Math.floor(gw / 175)), gap = 12;
+    const cardW = (gw - gap * (cols - 1)) / cols, cardH = 62;
+    r.fields.forEach((f, i) => {
+      const cx = gx + (i % cols) * (cardW + gap);
+      const cy = 74 + Math.floor(i / cols) * (cardH + gap);
+      this.card(f, cx, cy, cardW, cardH, (now - this.shownAt) / 1000 / 0.28 - i * 0.04);
+    });
+  }
+}
+
 // --- scenes registry + tabs ------------------------------------------------
-const scenes: Record<string, Scene> = { router: new RouterScene(), reflex: new StackerScene(), swarm: new SwarmScene(), gauntlet: new GauntletScene() };
+const scenes: Record<string, Scene> = { router: new RouterScene(), reflex: new StackerScene(), swarm: new SwarmScene(), gauntlet: new GauntletScene(), triage: new TriageScene() };
 document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach((b) => {
   b.onclick = () => {
     document.querySelectorAll("#tabs button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
@@ -785,7 +904,7 @@ document.querySelectorAll<HTMLButtonElement>("#tabs button").forEach((b) => {
 });
 
 // --- ledger (session totals + scrollable transaction history) --------------
-const SCENE_COLOR: Record<string, string> = { router: C.jev, reflex: C.amber, swarm: C.violet, gauntlet: C.cyan };
+const SCENE_COLOR: Record<string, string> = { router: C.jev, reflex: C.amber, swarm: C.violet, gauntlet: C.cyan, triage: C.green };
 const fmtTok = (n: number) => (n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "K" : String(Math.round(n)));
 const ledger = (() => {
   const list = $("#lg-list"), drawer = $("#ledger");
@@ -830,9 +949,9 @@ function connect() {
   };
   ws.onclose = () => { badge.dataset.mode = "sim"; badgeText.textContent = "reconnecting…"; setTimeout(connect, 1200); };
 }
-function currentScene(): "router" | "reflex" | "swarm" | "gauntlet" {
+function currentScene(): "router" | "reflex" | "swarm" | "gauntlet" | "triage" {
   const sel = document.querySelector('#tabs button[aria-selected="true"]') as HTMLButtonElement | null;
-  return (sel?.dataset.scene as "router" | "reflex" | "swarm" | "gauntlet") ?? "router";
+  return (sel?.dataset.scene as "router" | "reflex" | "swarm" | "gauntlet" | "triage") ?? "router";
 }
 function applyHealth(h: Health) {
   badge.dataset.mode = h.mode;
