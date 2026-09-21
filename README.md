@@ -43,6 +43,7 @@ the keys and makes every decision call; the browser is a pure renderer.
 
 - Every scene that makes repeated calls (**Router**, **Stacker**) **opens paused** behind a
   **Start / Pause** button and a speed slider — nothing is billed until you press Start.
+  Stacker also has a **Reset** to wipe the board and stats and start a fresh game.
 - **Swarm** and **Gauntlet** run only on their button press.
 - The **Ledger** (top-right counter) opens a live, scrollable log of every billed call —
   input, verdict, tokens, latency, cost — and is also appended to `logs/transactions.jsonl`.

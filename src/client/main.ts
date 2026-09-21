@@ -541,6 +541,7 @@ class StackerScene implements Scene {
     panel.className = "panel controls";
     panel.innerHTML = `
       <button class="btn" id="rx-toggle">▶ Start</button>
+      <button class="btn ghost" id="rx-reset">⟲ Reset</button>
       <label>speed <span id="rx-rn">3</span>/s</label>
       <input type="range" id="rx-rate" min="1" max="8" step="1" value="3" />
       <span class="chip" id="rx-status">paused · idle</span>`;
@@ -552,6 +553,15 @@ class StackerScene implements Scene {
       t.textContent = this.running ? "⏸ Pause" : "▶ Start";
       t.classList.toggle("ghost", this.running);
       ($("#rx-status")).textContent = this.running ? "playing — live calls" : "paused · idle";
+    };
+    ($("#rx-reset") as HTMLButtonElement).onclick = () => {
+      this.running = false;
+      send({ type: "reflex.reset" }); // server: new game, paused
+      this.f = null; this.drop = null; this.flashRows.clear(); this.overFlash = 0;
+      this.lat = []; this.stamps = []; this.best = 0;
+      t.textContent = "▶ Start"; t.classList.remove("ghost");
+      ($("#rx-status")).textContent = "reset · idle";
+      setTile(0, "0"); setTile(1, "0"); setTile(2, "0"); setTile(3, "0"); setTile(4, "—");
     };
     ($("#rx-rate") as HTMLInputElement).oninput = (e) => {
       const v = Number((e.target as HTMLInputElement).value);

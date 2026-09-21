@@ -429,6 +429,7 @@ class Session {
         this.stackerRunning = msg.on;
         break;
       case "reflex.rate": this.stackerPerSec = Math.max(1, Math.min(10, msg.perSec)); break;
+      case "reflex.reset": this.startStacker(); break; // aborts the loop, new game, paused
       case "swarm.broadcast": this.runSwarm(msg.event, msg.count); break;
       case "gauntlet.start": this.runGauntlet(msg.count); break;
     }

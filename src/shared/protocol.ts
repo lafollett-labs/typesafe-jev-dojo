@@ -109,7 +109,8 @@ export type ClientMsg =
   | { type: "swarm.broadcast"; event: string; count: number }
   | { type: "gauntlet.start"; count: number }
   | { type: "reflex.run"; on: boolean }
-  | { type: "reflex.rate"; perSec: number };
+  | { type: "reflex.rate"; perSec: number }
+  | { type: "reflex.reset" };
 
 /** One line in the transaction ledger — a single billed call. */
 export interface TxEntry {
