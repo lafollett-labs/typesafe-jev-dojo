@@ -1,9 +1,28 @@
 {
   "name": "typesafe-jev-dojo",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
-  "description": "A dojo for spiking out TypeSafe's Jev (System One) decision model via OpenRouter.",
+  "description": "A live, graphical dojo for TypeSafe's Jev (System One) typed decision model — routing, a Tetris-playing agent, parallel swarms, and an honest Jev-vs-Claude gauntlet.",
+  "license": "MIT",
+  "author": "LaFollett Labs",
+  "homepage": "https://github.com/lafollett-labs/typesafe-jev-dojo#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lafollett-labs/typesafe-jev-dojo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lafollett-labs/typesafe-jev-dojo/issues"
+  },
+  "keywords": [
+    "jev",
+    "typesafe",
+    "system-one",
+    "decision-model",
+    "openrouter",
+    "typescript",
+    "canvas",
+    "demo"
+  ],
   "engines": {
     "node": ">=26"
   },
